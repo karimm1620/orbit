@@ -7,140 +7,142 @@
 
 ## 0. Before implementation
 
-- [ ] Create the Orbit repository.
-- [ ] Add the canonical bootstrap docs.
-- [ ] Confirm `git` is installed and record the development Git version.
-- [ ] Confirm Rust toolchain.
-- [ ] Confirm pnpm.
-- [ ] Install the official Linux/Tauri system prerequisites for Arch.
-- [ ] Scaffold current Tauri 2 + React + TypeScript project using pnpm.
-- [ ] Run the untouched scaffold before major edits.
-- [ ] Commit the clean scaffold baseline.
-- [ ] Create `feat/m0-repository-foundation`.
+- [x] Create the Orbit repository.
+- [x] Add the canonical bootstrap docs.
+- [x] Confirm `git` is installed and record the development Git version.
+- [x] Confirm Rust toolchain.
+- [x] Confirm pnpm.
+- [x] Install the official Linux/Tauri system prerequisites for Arch.
+- [x] Scaffold current Tauri 2 + React + TypeScript project using pnpm.
+- [x] Run the untouched scaffold before major edits.
+- [x] Commit the clean scaffold baseline.
+- [x] Create `feat/m0-repository-foundation`.
 
 ---
 
 ## 1. Project quality baseline
 
-- [ ] Preserve the generated Tauri project conventions unless there is a concrete reason to change them.
-- [ ] Configure TypeScript strictness appropriate for the scaffold.
-- [ ] Configure lint/format scripts.
-- [ ] Add Rust formatting/clippy/test commands to documented validation.
-- [ ] Add a minimal GitHub Actions workflow for Linux validation.
-- [ ] Keep lockfiles committed.
-- [ ] Do not add graph/state/database/highlighting libraries in M0.
+- [x] Preserve the generated Tauri project conventions unless there is a concrete reason to change them.
+- [x] Configure TypeScript strictness appropriate for the scaffold.
+- [x] Configure lint/format scripts.
+- [x] Add Rust formatting/clippy/test commands to documented validation.
+- [x] Add a minimal GitHub Actions workflow for Linux validation.
+- [x] Keep lockfiles committed.
+- [x] Do not add graph/state/database/highlighting libraries in M0.
 
 ---
 
 ## 2. Rust error model
 
-- [ ] Define structured application error type.
-- [ ] Add stable error codes for M0.
-- [ ] Map "git executable missing".
-- [ ] Map invalid/non-repository selection.
-- [ ] Map repository unavailable.
-- [ ] Map unsupported Git/repository state where needed.
-- [ ] Ensure raw stderr is not the only frontend contract.
-- [ ] Add unit tests for mappings.
+- [x] Define structured application error type.
+- [x] Add stable error codes for M0.
+- [x] Map "git executable missing".
+- [x] Map invalid/non-repository selection.
+- [x] Map repository unavailable.
+- [x] Map unsupported Git/repository state where needed.
+- [x] Ensure raw stderr is not the only frontend contract.
+- [x] Add unit tests for mappings.
 
 ---
 
 ## 3. Git process boundary
 
-- [ ] Create one low-level Git process runner.
-- [ ] Ensure no shell is used.
-- [ ] Allow explicit working directory/repository context.
-- [ ] Capture exit status/stdout/stderr safely.
-- [ ] Add Git version detection.
-- [ ] Add size/encoding handling appropriate to each parser.
-- [ ] Prevent frontend access to the generic process runner.
-- [ ] Add unit/integration tests.
+- [x] Create one low-level Git process runner.
+- [x] Ensure no shell is used.
+- [x] Allow explicit working directory/repository context.
+- [x] Capture exit status/stdout/stderr safely.
+- [x] Add Git version detection.
+- [x] Add size/encoding handling appropriate to each parser.
+- [x] Prevent frontend access to the generic process runner.
+- [x] Add unit/integration tests.
 
 ---
 
 ## 4. Repository selection and authorization
 
-- [ ] Add native directory picker through the privileged side.
-- [ ] Handle user cancellation.
-- [ ] Resolve selected location through Git rather than only checking for a `.git` directory.
-- [ ] Resolve canonical repository/work-tree root.
-- [ ] Create opaque runtime repository ID/context.
-- [ ] Return typed repository descriptor.
+- [x] Add native directory picker through the privileged side.
+- [x] Handle user cancellation.
+- [x] Resolve selected location through Git rather than only checking for a `.git` directory.
+- [x] Resolve canonical repository/work-tree root.
+- [x] Create opaque runtime repository ID/context.
+- [x] Return typed repository descriptor.
 - [ ] Revalidate recent paths before reopening.
-- [ ] Verify no broad filesystem capability was accidentally enabled.
+- [x] Verify no broad filesystem capability was accidentally enabled.
 
 ---
 
 ## 5. Repository status parser
 
-- [ ] Use stable machine-readable Git output.
-- [ ] Parse current branch.
-- [ ] Parse detached HEAD.
-- [ ] Parse HEAD OID.
-- [ ] Parse upstream if configured.
-- [ ] Parse ahead/behind if available.
-- [ ] Parse staged entries.
-- [ ] Parse unstaged entries.
-- [ ] Parse untracked entries.
-- [ ] Parse conflicts.
-- [ ] Test spaces in filenames.
-- [ ] Test Unicode filenames.
-- [ ] Test leading `-` filename.
-- [ ] Test newline-containing filename where the filesystem/Git allows it.
-- [ ] Test repository with no commits.
+- [x] Use stable machine-readable Git output.
+- [x] Parse current branch.
+- [x] Parse detached HEAD.
+- [x] Parse HEAD OID.
+- [x] Parse upstream if configured.
+- [x] Parse ahead/behind if available.
+- [x] Parse staged entries.
+- [x] Parse unstaged entries.
+- [x] Parse untracked entries.
+- [x] Parse conflicts.
+- [x] Test spaces in filenames.
+- [x] Test Unicode filenames.
+- [x] Test leading `-` filename.
+- [x] Test newline-containing filename where the filesystem/Git allows it.
+- [x] Test repository with no commits.
 
 ---
 
 ## 6. Recent commit history
 
-- [ ] Define bounded history query.
-- [ ] Return full OID.
-- [ ] Return short OID.
-- [ ] Return parent OIDs.
-- [ ] Return subject.
-- [ ] Return author display name.
-- [ ] Return author email only if the UI requires it.
-- [ ] Return machine-friendly timestamp.
-- [ ] Test merge commit parents.
-- [ ] Test unusual commit text.
-- [ ] Ensure history size is bounded in M0.
+- [x] Define bounded history query.
+- [x] Return full OID.
+- [x] Return short OID.
+- [x] Return parent OIDs.
+- [x] Return subject.
+- [x] Return author display name.
+- [x] Return author email only if the UI requires it.
+- [x] Return machine-friendly timestamp.
+- [x] Test merge commit parents.
+- [x] Test unusual commit text.
+- [x] Ensure history size is bounded in M0.
 
 ---
 
 ## 7. Typed command API
 
-- [ ] Add `select_repository`.
-- [ ] Add `get_repository_snapshot` if refresh is separate.
-- [ ] Keep IPC commands purpose-specific.
-- [ ] Add typed TypeScript wrappers.
-- [ ] Centralize frontend invocation/error conversion.
-- [ ] Verify no `run_shell`.
-- [ ] Verify no frontend `run_git(args)`.
-- [ ] Verify no arbitrary path read/write command.
+- [x] Add `select_repository`.
+- [x] Add `get_repository_snapshot` if refresh is separate.
+- [x] Keep IPC commands purpose-specific.
+- [x] Add typed TypeScript wrappers.
+- [x] Centralize frontend invocation/error conversion.
+- [x] Verify no `run_shell`.
+- [x] Verify no frontend `run_git(args)`.
+- [x] Verify no arbitrary path read/write command.
 
 ---
 
 ## 8. M0 frontend
 
-- [ ] Create no-repository empty state.
-- [ ] Add Open Repository action.
-- [ ] Add loading state during repository read.
-- [ ] Render repository display name/path.
-- [ ] Render current branch or detached HEAD.
-- [ ] Render HEAD short OID.
-- [ ] Render clean/dirty summary.
-- [ ] Render staged/unstaged/untracked/conflict counts.
-- [ ] Render recent commit list.
-- [ ] Render contextual invalid-repository error.
-- [ ] Provide explicit refresh.
-- [ ] Do not build the final graph yet.
-- [ ] Avoid decorative dashboard-card overload.
+- [x] Create no-repository empty state.
+- [x] Add Open Repository action.
+- [x] Add loading state during repository read.
+- [x] Render repository display name/path.
+- [x] Render current branch or detached HEAD.
+- [x] Render HEAD short OID.
+- [x] Render clean/dirty summary.
+- [x] Render staged/unstaged/untracked/conflict counts.
+- [x] Render recent commit list.
+- [x] Render contextual invalid-repository error.
+- [x] Provide explicit refresh.
+- [x] Do not build the final graph yet.
+- [x] Avoid decorative dashboard-card overload.
 
 ---
 
 ## 9. Recent repositories
 
 Implement only if it remains small and does not distract from the trusted Git path.
+
+Deferred from M0: runtime repository authorization and the trusted Git path take priority over persistent recent-repository metadata.
 
 - [ ] Define minimal persistence format.
 - [ ] Store canonical path + display metadata + last opened.
@@ -152,18 +154,18 @@ Implement only if it remains small and does not distract from the trusted Git pa
 
 ## 10. Integration test repository matrix
 
-- [ ] normal repository with commits
-- [ ] empty repository / unborn branch
-- [ ] detached HEAD
-- [ ] modified tracked file
-- [ ] staged file
-- [ ] staged + unstaged changes on same file
-- [ ] untracked file
+- [x] normal repository with commits
+- [x] empty repository / unborn branch
+- [x] detached HEAD
+- [x] modified tracked file
+- [x] staged file
+- [x] staged + unstaged changes on same file
+- [x] untracked file
 - [ ] renamed file
 - [ ] merge commit
-- [ ] conflict state where practical
-- [ ] invalid directory
-- [ ] unusual filenames
+- [x] conflict state where practical
+- [x] invalid directory
+- [x] unusual filenames
 
 Use temporary repositories created by tests; do not rely only on the developer's real projects.
 
@@ -171,19 +173,23 @@ Use temporary repositories created by tests; do not rely only on the developer's
 
 ## 11. Validation before PR
 
-- [ ] pnpm install uses the committed lockfile.
-- [ ] frontend lint passes.
-- [ ] frontend typecheck passes.
+- [x] pnpm install uses the committed lockfile.
+- [x] frontend lint passes.
+- [x] frontend typecheck passes.
 - [ ] frontend tests pass if introduced.
-- [ ] `cargo fmt --check` passes.
-- [ ] `cargo clippy` passes under the project's agreed policy.
-- [ ] Rust tests pass.
-- [ ] Tauri development/check/build validation appropriate to the environment passes.
+- [x] `cargo fmt --check` passes.
+- [x] `cargo clippy` passes under the project's agreed policy.
+- [x] Rust tests pass.
+- [x] Tauri development/check/build validation appropriate to the environment passes.
 - [ ] M0 manual smoke test opens at least one real repository.
-- [ ] Security checklist reviewed.
-- [ ] No mock repository data remains in accepted path.
-- [ ] No unsupported performance claims.
-- [ ] Documentation updated for actual implementation.
+- [x] Security checklist reviewed.
+- [x] No mock repository data remains in accepted path.
+- [x] No unsupported performance claims.
+- [x] Documentation updated for actual implementation.
+
+Frontend tests were not introduced in M0. The desktop process and native picker launch were
+smoke-tested, but the headless automation session could not confirm a folder in the desktop
+portal, so the real-repository manual UI smoke remains explicitly unverified.
 
 ---
 

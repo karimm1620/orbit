@@ -1,116 +1,394 @@
-.logo.vite:hover {
-  filter: drop-shadow(0 0 2em #747bff);
-}
-
-.logo.react:hover {
-  filter: drop-shadow(0 0 2em #61dafb);
-}
 :root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 16px;
-  line-height: 24px;
-  font-weight: 400;
-
-  color: #0f0f0f;
-  background-color: #f6f6f6;
-
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #e8ebef;
+  background: #101317;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
+  --line: #2b333d;
+  --muted: #8e9aa8;
+  --accent: #78d6a3;
+  --accent-strong: #96edbb;
+  --danger: #ff8a8a;
 }
 
-.container {
+* {
+  box-sizing: border-box;
+}
+
+body {
   margin: 0;
-  padding-top: 10vh;
+  min-width: 320px;
+  min-height: 100vh;
+  background: #101317;
+}
+
+button {
+  font: inherit;
+}
+
+button:focus-visible {
+  outline: 2px solid var(--accent-strong);
+  outline-offset: 3px;
+}
+
+.app-shell {
+  min-height: 100vh;
+}
+
+.app-header {
+  height: 64px;
+  padding: 0 28px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #12161b;
+}
+
+.brand {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.brand-mark {
+  color: var(--accent);
+  font-size: 21px;
+}
+
+.button {
+  border: 1px solid transparent;
+  border-radius: 7px;
+  padding: 9px 14px;
+  color: inherit;
+  cursor: pointer;
+  font-weight: 650;
+}
+
+.button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.button-primary {
+  background: var(--accent);
+  color: #0b1911;
+}
+
+.button-primary:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+
+.button-secondary {
+  border-color: var(--line);
+  background: #1a2026;
+}
+
+.button-secondary:hover:not(:disabled) {
+  border-color: #596673;
+  background: #202831;
+}
+
+.empty-state {
+  width: min(560px, calc(100% - 48px));
+  min-height: calc(100vh - 64px);
+  margin: 0 auto;
   display: flex;
   flex-direction: column;
+  align-items: flex-start;
   justify-content: center;
-  text-align: center;
 }
 
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: 0.75s;
+.empty-state h1,
+.repository-heading h1 {
+  margin: 6px 0 0;
+  font-size: clamp(34px, 6vw, 56px);
+  line-height: 1.04;
+  letter-spacing: -0.045em;
 }
 
-.logo.tauri:hover {
-  filter: drop-shadow(0 0 2em #24c8db);
+.empty-state > p:not(.eyebrow) {
+  max-width: 520px;
+  margin: 22px 0 28px;
+  color: #b2bbc5;
+  font-size: 18px;
+  line-height: 1.65;
 }
 
-.row {
+.empty-hint {
+  margin-top: 14px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.eyebrow {
+  margin: 0;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.error-banner {
+  margin: 20px 28px 0;
+  padding: 14px 16px;
+  border: 1px solid #713c42;
+  border-left: 3px solid var(--danger);
   display: flex;
-  justify-content: center;
+  justify-content: space-between;
+  gap: 24px;
+  background: #24191c;
 }
 
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
+.error-banner p {
+  margin: 4px 0 0;
+  color: #d8b9bd;
 }
 
-a:hover {
-  color: #535bf2;
+.error-banner code {
+  color: var(--danger);
 }
 
-h1 {
-  text-align: center;
+.error-detail {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
 }
 
-input,
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
-  transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
+.workspace {
+  padding: 38px 28px 48px;
 }
 
-button {
-  cursor: pointer;
+.repository-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 28px;
 }
 
-button:hover {
-  border-color: #396cd8;
-}
-button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
+.repository-heading h1 {
+  font-size: clamp(30px, 4vw, 44px);
 }
 
-input,
-button {
-  outline: none;
+.repository-path {
+  max-width: min(720px, 75vw);
+  margin: 10px 0 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-#greet-input {
-  margin-right: 5px;
+.head-line {
+  margin-top: 30px;
+  padding: 14px 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--muted);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
+.head-line > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.head-line strong {
+  color: #f2f4f6;
+}
+
+.head-line code,
+.commit-list code {
+  border-radius: 4px;
+  padding: 2px 6px;
+  background: #232a32;
+  color: #b8c3ce;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+}
+
+.state-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #e0a96b;
+}
+
+.state-dot.clean {
+  background: var(--accent);
+}
+
+.workspace-grid {
+  margin-top: 36px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 260px;
+  gap: 52px;
+}
+
+.section-heading {
+  margin-bottom: 18px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+}
+
+.section-heading > span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+h2 {
+  margin: 5px 0 0;
+  font-size: 20px;
+  letter-spacing: -0.02em;
+}
+
+.commit-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.commit-list li {
+  position: relative;
+  min-height: 64px;
+  padding: 12px 0 12px 28px;
+  border-top: 1px solid var(--line);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 18px;
+  align-items: center;
+}
+
+.commit-list li::before {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 7px;
+  width: 1px;
+  background: #34413b;
+  content: "";
+}
+
+.commit-node {
+  position: absolute;
+  z-index: 1;
+  left: 3px;
+  width: 9px;
+  height: 9px;
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  background: #101317;
+}
+
+.commit-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.commit-copy strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.commit-copy span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.repository-sidebar {
+  border-left: 1px solid var(--line);
+  padding-left: 28px;
+}
+
+.change-counts {
+  margin: 18px 0 0;
+}
+
+.change-counts > div {
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  justify-content: space-between;
+}
+
+.change-counts dt {
+  color: #b5bec7;
+}
+
+.change-counts dd {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-weight: 700;
+}
+
+.change-counts .conflict-count {
+  color: var(--danger);
+}
+
+.upstream {
+  margin-top: 34px;
+}
+
+.upstream > strong {
+  display: block;
+  margin-top: 16px;
+  overflow-wrap: anywhere;
+}
+
+.upstream > p:not(.eyebrow) {
+  color: var(--muted);
+}
+
+.history-empty {
+  padding: 28px 0;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+}
+
+.history-empty strong {
+  color: #e8ebef;
+}
+
+.history-empty p {
+  margin: 6px 0 0;
+}
+
+@media (max-width: 760px) {
+  .app-header,
+  .workspace {
+    padding-right: 20px;
+    padding-left: 20px;
   }
 
-  a:hover {
-    color: #24c8db;
+  .workspace-grid {
+    grid-template-columns: 1fr;
+    gap: 36px;
   }
 
-  input,
-  button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
+  .repository-sidebar {
+    border-top: 1px solid var(--line);
+    border-left: 0;
+    padding-top: 28px;
+    padding-left: 0;
   }
-  button:active {
-    background-color: #0f0f0f69;
+
+  .head-line {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 6px;
   }
 }

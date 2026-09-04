@@ -160,6 +160,17 @@ Avoid granting generic filesystem plugin permissions simply to support repositor
 
 Any Tauri capability added for dialogs, filesystem, shell, process, URL opening, or other privileged APIs must be reviewed narrowly.
 
+### M0 implementation
+
+The M0 boundary exposes only `select_repository` and `get_repository_snapshot` to the WebView.
+
+- `select_repository` invokes the official dialog plugin from Rust; no dialog or filesystem plugin permission is granted to frontend code.
+- Successful selection creates a process-local opaque repository ID mapped to the canonical Git work-tree root in Rust.
+- Refresh accepts only that repository ID and revalidates the stored root before reading it.
+- The internal Git runner launches `git` directly with separate arguments, closed stdin, bounded stdout/stderr readers, and no shell.
+- Status reads override `core.fsmonitor=false` for that command so opening a repository cannot invoke a configured filesystem-monitor hook.
+- The unused scaffold opener plugin and permission are removed.
+
 ---
 
 ## 5. Repository authorization
