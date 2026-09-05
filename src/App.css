@@ -57,6 +57,8 @@ body { margin: 0; min-width: 320px; min-height: 100vh; background: var(--surface
 button { font: inherit; }
 button:focus-visible { outline: 2px solid var(--accent-soft); outline-offset: 3px; }
 code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+::selection { background: color-mix(in srgb, var(--accent) 38%, transparent); color: var(--text); }
+* { scrollbar-color: var(--line-strong) var(--surface); }
 
 .app-shell { min-height: 100dvh; }
 .app-header { height: 68px; padding: 0 32px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; background: var(--surface-raised); }
@@ -112,10 +114,13 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 .commit-graph > li { border-bottom: 1px solid var(--line); }
 .commit-row { width: 100%; height: 66px; padding: 0 10px 0 0; border: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: stretch; overflow: hidden; background: transparent; color: var(--text); cursor: pointer; text-align: left; }
 .commit-row:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
-.commit-row.is-selected { background: color-mix(in srgb, var(--accent) 12%, transparent); box-shadow: inset 3px 0 0 var(--accent); }
+.commit-row.is-selected { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.commit-row.is-selected .commit-subject { color: var(--accent-soft); }
+.commit-row.is-selected .graph-lane { opacity: 0.9; }
+.commit-row:focus-visible { outline-offset: -3px; }
 .graph-strip { display: block; flex: none; align-self: stretch; overflow: visible; }
-.graph-lane { stroke: var(--line-strong); stroke-width: 1.5; }
-.graph-edge { fill: none; stroke-width: 1.8; stroke-linecap: round; }
+.graph-lane { stroke: var(--line-strong); stroke-width: 1.5; opacity: 0.72; }
+.graph-edge { fill: none; stroke-width: 1.75; stroke-linecap: round; }
 .graph-edge-convergence { stroke-dasharray: 2 2; }
 .graph-node { fill: var(--surface); stroke-width: 2.5; }
 .graph-color-0 { stroke: var(--graph-1); }
@@ -156,7 +161,7 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 
 .history-footer { min-height: 58px; padding-top: 16px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
 .load-more { min-width: 180px; }
-.history-end { margin: 0; color: var(--muted); font-size: 11px; }
+.history-end, .history-continuation { margin: 0; color: var(--muted); font-size: 11px; }
 .history-load-error { width: 100%; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--line)); display: flex; justify-content: space-between; gap: 12px; color: var(--muted-strong); font-size: 12px; }
 .history-loading, .history-empty, .history-error { padding: 24px 0; border-top: 1px solid var(--line); }
 .history-loading { display: flex; flex-direction: column; gap: 9px; }
