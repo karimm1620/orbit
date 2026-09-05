@@ -77,7 +77,7 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 .empty-state h1, .repository-heading h1 { margin: 8px 0 0; color: var(--text); font-size: clamp(32px, 5vw, 52px); line-height: 1.06; letter-spacing: -0.05em; }
 .empty-state > p:not(.eyebrow) { max-width: 500px; margin: 20px 0 26px; color: var(--muted-strong); font-size: 17px; line-height: 1.55; }
 .empty-hint { margin-top: 14px; color: var(--muted); font-size: 12px; }
-.error-banner { margin: 20px 32px 0; padding: 14px 16px; border: 1px solid color-mix(in srgb, var(--danger) 50%, var(--line)); border-left: 3px solid var(--danger); display: flex; justify-content: space-between; gap: 24px; background: color-mix(in srgb, var(--danger) 10%, var(--surface-raised)); }
+.error-banner { margin: 20px 32px 0; padding: 14px 16px; border: 1px solid color-mix(in srgb, var(--danger) 50%, var(--line)); display: flex; justify-content: space-between; gap: 24px; background: color-mix(in srgb, var(--danger) 10%, var(--surface-raised)); }
 .error-banner p { margin: 4px 0 0; color: var(--muted-strong); }
 .error-banner code { color: var(--danger); font-size: 12px; }
 .error-detail { overflow-wrap: anywhere; font-size: 12px; }
