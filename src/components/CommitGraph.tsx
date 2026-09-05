@@ -15,7 +15,8 @@ type CommitGraphProps = {
 
 export function CommitGraph({ rows, selectedOid, onSelect }: CommitGraphProps) {
   const columns = buildColumns(rows);
-  const graphWidth = Math.max(86, columns.maxColumns * LANE_WIDTH + GRAPH_PADDING * 2);
+  const graphWidth = Math.min(220, Math.max(86, columns.maxColumns * LANE_WIDTH + GRAPH_PADDING * 2));
+  const laneWidth = (graphWidth - GRAPH_PADDING * 2) / columns.maxColumns;
 
   return (
     <ol className="commit-graph" aria-label="Commit history">
@@ -35,6 +36,7 @@ export function CommitGraph({ rows, selectedOid, onSelect }: CommitGraphProps) {
                 row={row}
                 columns={columns.byRow[index]}
                 graphWidth={graphWidth}
+                laneWidth={laneWidth}
               />
               <span className="commit-row-copy">
                 <span className="commit-row-topline">
@@ -112,13 +114,15 @@ function GraphStrip({
   row,
   columns,
   graphWidth,
+  laneWidth,
 }: {
   row: GraphRow;
   columns: Map<GraphLaneId, number>;
   graphWidth: number;
+  laneWidth: number;
 }) {
   const nodeColumn = columns.get(row.node.laneId) ?? 0;
-  const nodeX = GRAPH_PADDING + nodeColumn * LANE_WIDTH;
+  const nodeX = GRAPH_PADDING + nodeColumn * laneWidth;
 
   return (
     <svg
@@ -133,29 +137,30 @@ function GraphStrip({
         <line
           key={`lane-${laneId}`}
           className={`graph-lane ${laneColorClass(laneId)}`}
-          x1={GRAPH_PADDING + column * LANE_WIDTH}
+          x1={GRAPH_PADDING + column * laneWidth}
           y1="0"
-          x2={GRAPH_PADDING + column * LANE_WIDTH}
+          x2={GRAPH_PADDING + column * laneWidth}
           y2={ROW_HEIGHT}
         />
       ))}
       {row.edges.map((edge, edgeIndex) => (
-        <GraphEdgePath
-          key={`${edge.parentOid ?? "convergence"}-${edgeIndex}`}
-          edge={edge}
-          columns={columns}
-        />
+          <GraphEdgePath
+            key={`${edge.parentOid ?? "convergence"}-${edgeIndex}`}
+            edge={edge}
+            columns={columns}
+            laneWidth={laneWidth}
+          />
       ))}
       <circle className={`graph-node ${laneColorClass(row.node.laneId)}${row.isHead ? " graph-node-head" : ""}`} cx={nodeX} cy={ROW_HEIGHT / 2} r="5" />
     </svg>
   );
 }
 
-function GraphEdgePath({ edge, columns }: { edge: GraphEdge; columns: Map<GraphLaneId, number> }) {
+function GraphEdgePath({ edge, columns, laneWidth }: { edge: GraphEdge; columns: Map<GraphLaneId, number>; laneWidth: number }) {
   const fromColumn = columns.get(edge.fromLaneId) ?? 0;
   const toColumn = columns.get(edge.toLaneId) ?? 0;
-  const fromX = GRAPH_PADDING + fromColumn * LANE_WIDTH;
-  const toX = GRAPH_PADDING + toColumn * LANE_WIDTH;
+  const fromX = GRAPH_PADDING + fromColumn * laneWidth;
+  const toX = GRAPH_PADDING + toColumn * laneWidth;
   const startY = ROW_HEIGHT / 2;
   const endY = ROW_HEIGHT;
 

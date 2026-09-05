@@ -45,6 +45,7 @@ function App() {
     const sequence = ++requestSequence.current;
     setRequestState("opening");
     setError(null);
+    setHistory((current) => current.status === "loading-more" ? { ...current, status: "idle" } : current);
     try {
       const selected = await selectRepository();
       if (sequence !== requestSequence.current || !selected) return;
@@ -64,13 +65,18 @@ function App() {
     setRequestState("refreshing");
     setError(null);
     setSelectedOid(null);
+    setHistory((current) => ({ ...current, status: "loading", error: null }));
     try {
       const refreshed = await getRepositorySnapshot(repository.repositoryId);
       if (sequence !== requestSequence.current) return;
       setRepository(refreshed);
       await loadInitialHistory(refreshed, sequence);
     } catch (requestError) {
-      if (sequence === requestSequence.current) setError(toOrbitError(requestError));
+      if (sequence === requestSequence.current) {
+        const orbitError = toOrbitError(requestError);
+        setError(orbitError);
+        setHistory((current) => ({ ...current, status: "idle", error: orbitError }));
+      }
     } finally {
       if (sequence === requestSequence.current) setRequestState("idle");
     }
@@ -186,7 +192,7 @@ function HistoryError({ error, onRetry }: { error: OrbitError; onRetry: () => vo
 }
 
 function HistoryFooter({ history, onLoadMore, onRetry }: { history: HistoryState; onLoadMore: () => void; onRetry: () => void }) {
-  return <div className="history-footer">{history.error && <div className="history-load-error" role="alert"><span>{history.error.message}</span><button className="text-button" onClick={onRetry}>Retry</button></div>}{history.hasMore ? <button className="button button-secondary load-more" onClick={onLoadMore} disabled={history.status === "loading-more"}>{history.status === "loading-more" ? "Loading older commits..." : "Load older commits"}</button> : <p className="history-end">{history.sessionLimitReached ? "History session limit reached. Refresh to start a new snapshot." : "End of available history"}</p>}</div>;
+  return <div className="history-footer">{history.error && <div className="history-load-error" role="alert"><span>{history.error.message}</span><button className="text-button" onClick={onRetry}>Retry</button></div>}{history.hasMore ? <button className="button button-secondary load-more" onClick={onLoadMore} disabled={history.status !== "idle"}>{history.status === "loading-more" ? "Loading older commits..." : "Load older commits"}</button> : <p className="history-end">{history.sessionLimitReached ? "History session limit reached. Refresh to start a new snapshot." : "End of available history"}</p>}</div>;
 }
 
 function ChangeCount({ label, value, alert = false }: { label: string; value: number; alert?: boolean }) {
