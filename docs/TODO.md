@@ -105,16 +105,19 @@ The B2b graph workspace now consumes the bounded history service without adding 
 
 ## 8. Validation before M1 PR
 
-- [ ] `pnpm lint`
-- [ ] `pnpm typecheck`
-- [ ] frontend topology/UI tests
-- [ ] `cargo fmt --check`
-- [ ] `cargo test --locked`
-- [ ] `cargo clippy --locked --all-targets --all-features -- -D warnings`
-- [ ] appropriate Tauri check/build validation
+- [x] `pnpm install --frozen-lockfile`
+- [x] `pnpm lint`
+- [x] `pnpm typecheck`
+- [x] `pnpm build`
+- [x] frontend topology tests (11 Vitest tests)
+- [x] `cargo fmt --check`
+- [x] `cargo check --locked`
+- [x] `cargo test --locked` (46 Rust tests)
+- [x] `cargo clippy --locked --all-targets --all-features -- -D warnings`
+- [x] `pnpm tauri build --debug --no-bundle`
 - [ ] real-repository desktop smoke covering nonlinear history and load-more
-- [ ] final security and dependency review
-- [ ] no M2+ mutation or diff implementation in the branch
+- [x] final security and dependency review
+- [x] no M2+ mutation or diff implementation in the branch
 
 ---
 

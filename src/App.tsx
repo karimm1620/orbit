@@ -192,7 +192,7 @@ function HistoryError({ error, onRetry }: { error: OrbitError; onRetry: () => vo
 }
 
 function HistoryFooter({ history, onLoadMore, onRetry }: { history: HistoryState; onLoadMore: () => void; onRetry: () => void }) {
-  return <div className="history-footer">{history.error && <div className="history-load-error" role="alert"><span>{history.error.message}</span><button className="text-button" onClick={onRetry}>Retry</button></div>}{history.hasMore ? <><p className="history-continuation">Graph continues below the loaded history.</p><button className="button button-secondary load-more" onClick={onLoadMore} disabled={history.status !== "idle"}>{history.status === "loading-more" ? "Loading older commits..." : "Load older commits"}</button></> : <p className="history-end">{history.sessionLimitReached ? "History session limit reached. Refresh to start a new snapshot." : "End of available history"}</p>}</div>;
+  return <div className="history-footer">{history.error && <div className="history-load-error" role="alert"><span>{history.error.message}</span><button className="text-button" onClick={onRetry}>Retry</button></div>}{history.sessionLimitReached ? <p className="history-end">History session limit reached. Refresh to start a new snapshot.</p> : history.hasMore ? <><p className="history-continuation">Graph continues below the loaded history.</p><button className="button button-secondary load-more" onClick={onLoadMore} disabled={history.status !== "idle"}>{history.status === "loading-more" ? "Loading older commits..." : "Load older commits"}</button></> : <p className="history-end">End of available history</p>}</div>;
 }
 
 function ChangeCount({ label, value, alert = false }: { label: string; value: number; alert?: boolean }) {

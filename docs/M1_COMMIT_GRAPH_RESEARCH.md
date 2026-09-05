@@ -340,18 +340,18 @@ No dependency is selected or installed in this phase.
 - A virtualization dependency remains conditional on measured need and a separate maintenance,
   bundle-size, accessibility, and compatibility review.
 
-## 11. Implementation handoff
+## 11. Implementation status
 
 M1 B1 completed the Rust history-session state, structured parsers, ref mapping, capability probe,
 purpose-specific typed IPC, and temporary real-repository integration fixtures. B2a completed the
-pure deterministic topology reducer and pagination fixtures. B2b should proceed in this order:
+pure deterministic topology reducer and pagination fixtures. B2b completed the accessible DOM-row
+and presentation-only SVG-strip renderer, explicit incremental loading, commit selection, and
+read-only details surface.
 
-1. consume `get_commit_history_page` from the M1 graph state layer
-2. implement the accessible DOM-row + SVG-strip renderer and incremental loading states
-3. profile the defined row counts before deciding whether windowing is needed
-
-Do not add commit mutation, branch mutation, diff rendering, provider APIs, persistence, file
-watching, or final visual polish as part of that slice.
+The profiling gate remains open, so virtualization is still deferred without a performance claim.
+A picker-to-real-repository desktop interaction smoke also remains unverified in the available
+automation environment. Commit mutation, branch mutation, diff rendering, provider APIs,
+persistence, and file watching remain outside M1.
 
 ## 12. Primary references
 
