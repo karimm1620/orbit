@@ -465,9 +465,41 @@ Separate:
 
 Do not couple Git parsing directly to SVG/canvas/DOM rendering.
 
-M1 should research the smallest rendering approach that can handle large histories on lower-end hardware.
+M1 locks the following split:
 
-Avoid loading full history before displaying the first page.
+```text
+native Git log + for-each-ref
+        ↓ bounded NUL-framed parsers
+Rust CommitGraphPage + opaque frontier cursor
+        ↓ purpose-specific typed IPC
+pure frontend lane reducer + carried continuation state
+        ↓
+accessible DOM rows + presentation-only per-row SVG
+```
+
+History uses topological order and starts from a Rust-owned snapshot of commit-bearing local
+branches, remote-tracking branches, tags, and HEAD. Ref metadata comes from a separate bounded
+`for-each-ref` query so annotated tags, symbolic refs, and ref kinds remain typed rather than being
+parsed from decoration text.
+
+Pagination advances an opaque Rust-owned frontier of unresolved full OIDs. It does not use an
+ever-growing `--skip` value and never accepts frontend revision expressions. The initial policy is
+100 commits per page, at most 200 per request, at most 512 active frontier tips, and at most 1,000
+loaded commits per history session. Exceeding a bound is explicit, never silent truncation.
+Refreshing creates a new coherent ref/history session.
+
+The frontend derives graph lanes from semantic parent relationships. Lane identity is stable and
+monotonic across appended pages; visual columns may compact when lanes close. First-parent
+continuation is preferred, secondary parents open lanes to its right, and converging lanes are
+deduplicated.
+
+Commit metadata, focus, selection, and keyboard behavior remain ordinary accessible DOM. A narrow
+per-row SVG is presentation-only and draws graph nodes and edges. No graph or virtualization
+dependency is approved initially. Profile 100, 500, and 1,000 loaded rows on a recorded Linux
+environment before deciding whether fixed-row windowing is necessary.
+
+The exact command framing, cursor state, type model, lane invariants, renderer comparison, and
+security mitigations are recorded in `M1_COMMIT_GRAPH_RESEARCH.md`.
 
 ---
 

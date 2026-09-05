@@ -9,6 +9,7 @@ use super::GitRunner;
 pub const RECENT_COMMIT_LIMIT: usize = 50;
 const HISTORY_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
 const HISTORY_FIELDS: usize = 6;
+const HISTORY_FORMAT_ARGUMENT: &str = "--format=%H%x00%h%x00%P%x00%s%x00%an%x00%ct";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,23 +35,35 @@ pub fn read_recent_commits(
     let output = runner.run(
         Some(root),
         "read_history",
-        [
-            "--no-pager",
-            "log",
-            "-n",
-            &limit,
-            "--date-order",
-            "--encoding=UTF-8",
-            "--format=%H%x00%h%x00%P%x00%s%x00%an%x00%ct",
-            "-z",
-            "HEAD",
-            "--",
-        ],
+        recent_history_arguments(&limit),
         HISTORY_OUTPUT_LIMIT,
     )?;
     let output = runner.require_success("read_history", output)?;
 
     parse_history(&output.stdout)
+}
+
+fn recent_history_arguments(limit: &str) -> [&str; 18] {
+    [
+        "--no-pager",
+        "--no-optional-locks",
+        "-c",
+        "log.showSignature=false",
+        "log",
+        "-n",
+        limit,
+        "--date-order",
+        "--no-decorate",
+        "--no-notes",
+        "--no-patch",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--encoding=UTF-8",
+        HISTORY_FORMAT_ARGUMENT,
+        "-z",
+        "HEAD",
+        "--",
+    ]
 }
 
 fn parse_history(output: &[u8]) -> Result<Vec<CommitSummary>, OrbitError> {
@@ -142,5 +155,25 @@ mod tests {
     fn rejects_partial_records() {
         let error = parse_history(b"abc\0def\0").expect_err("partial record");
         assert_eq!(error.code, "unsupported_repository_state");
+    }
+
+    #[test]
+    fn history_arguments_disable_configured_execution_surfaces() {
+        let arguments = recent_history_arguments("50");
+
+        assert!(arguments
+            .windows(2)
+            .any(|pair| { pair == ["-c", "log.showSignature=false"] }));
+        for argument in [
+            "--no-pager",
+            "--no-optional-locks",
+            "--no-decorate",
+            "--no-notes",
+            "--no-patch",
+            "--no-ext-diff",
+            "--no-textconv",
+        ] {
+            assert!(arguments.contains(&argument));
+        }
     }
 }

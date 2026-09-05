@@ -10,6 +10,7 @@ use std::{
 use crate::error::OrbitError;
 
 const STDERR_LIMIT: usize = 64 * 1024;
+const NO_LAZY_FETCH_ENVIRONMENT: &str = "GIT_NO_LAZY_FETCH";
 
 #[derive(Debug)]
 pub struct GitOutput {
@@ -92,6 +93,7 @@ impl GitRunner {
         #[cfg(test)]
         command.envs(self.environment.iter().cloned());
         scrub_git_environment(&mut command, self.test_environment_names());
+        command.env(NO_LAZY_FETCH_ENVIRONMENT, "1");
 
         if let Some(current_dir) = current_dir {
             command.current_dir(current_dir);
@@ -232,5 +234,30 @@ mod tests {
         assert!(is_git_environment_name(OsStr::new("GIT_CONFIG_KEY_0")));
         assert!(!is_git_environment_name(OsStr::new("PATH")));
         assert!(!is_git_environment_name(OsStr::new("ORBIT_GIT_DIR")));
+    }
+
+    #[test]
+    fn restores_the_internal_no_lazy_fetch_policy_after_scrubbing() {
+        let runner = GitRunner::with_executable("env")
+            .with_environment("GIT_DIR", "/tmp/untrusted")
+            .with_environment(NO_LAZY_FETCH_ENVIRONMENT, "0");
+
+        let output = runner
+            .run(
+                None,
+                "inspect_environment",
+                std::iter::empty::<&str>(),
+                64 * 1024,
+            )
+            .expect("environment process should run");
+        let output = runner
+            .require_success("inspect_environment", output)
+            .expect("environment process should succeed");
+        let environment = String::from_utf8(output.stdout).expect("environment should be UTF-8");
+
+        assert!(environment
+            .lines()
+            .any(|line| line == "GIT_NO_LAZY_FETCH=1"));
+        assert!(!environment.lines().any(|line| line.starts_with("GIT_DIR=")));
     }
 }

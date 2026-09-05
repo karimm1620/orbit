@@ -168,8 +168,34 @@ The M0 boundary exposes only `select_repository` and `get_repository_snapshot` t
 - Successful selection creates a process-local opaque repository ID mapped to the canonical Git work-tree root in Rust.
 - Refresh accepts only that repository ID and revalidates the stored root before reading it.
 - The internal Git runner launches `git` directly with separate arguments, closed stdin, bounded stdout/stderr readers, and no shell. It removes inherited `GIT_*` environment variables so launch-time repository/config overrides cannot redirect the authorized repository context.
+- After scrubbing inherited Git variables, the runner sets its own `GIT_NO_LAZY_FETCH=1` policy so Git versions that support it do not contact a promisor remote to satisfy a nominally local read.
 - Before a status read, Orbit obtains configured filter-driver names through bounded Git config output and overrides each driver's `clean`/`process` command to an empty value with `required=false`. Status also overrides `core.fsmonitor=false`, so opening a repository cannot invoke a configured content-filter program or filesystem-monitor hook.
+- Recent-history reads explicitly disable signature verification, decorations, notes, patch output, external diffs, and text conversion. This prevents repository configuration such as `log.showSignature` or a diff/textconv driver from turning the M0 history query into process execution.
 - The unused scaffold opener plugin and permission are removed.
+
+### M1 read-only graph boundary
+
+M1 adds only the proposed purpose-specific `get_commit_graph_page` domain operation. It accepts an
+opaque authorized repository ID, an opaque Rust-issued cursor, and a Rust-clamped page size. It does
+not accept paths, Git argument arrays, ref expressions, or arbitrary object expressions from React.
+
+Graph acquisition remains inside the existing `GitRunner`. The history command must explicitly use:
+
+- `--no-pager`
+- `--no-lazy-fetch`
+- `--no-optional-locks`
+- `-c log.showSignature=false`
+- `--no-decorate --no-notes --no-patch --no-ext-diff --no-textconv`
+
+`--no-lazy-fetch` is capability-probed because it was added in Git 2.45. If it is unavailable, M1
+graph acquisition fails closed with a structured unsupported-state error rather than risking an
+implicit network request, credential-helper invocation, remote helper, or fetch hook in a partial
+clone. M0 repository status remains usable.
+
+Refs come from a separate bounded `for-each-ref` call under the same no-pager, no-lazy-fetch,
+no-optional-locks process policy. Both parsers validate fixed framing and treat all commit/ref text
+as untrusted. SVG graph marks are presentation-only; repository-controlled text remains ordinary
+escaped React text and is never interpreted as HTML, a URL, or executable content.
 
 ---
 
@@ -273,6 +299,8 @@ Rules:
 M0 read commands deliberately remove inherited `GIT_*` variables at the child-process
 boundary. This prevents variables such as `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`,
 and command-line config injection variables from changing repository identity or read behavior.
+The runner then adds only its internal `GIT_NO_LAZY_FETCH=1` policy; a caller-provided value cannot
+override it.
 Future authenticated/mutating operations must explicitly review which Git environment inputs, if
 any, need to be restored rather than inheriting them implicitly.
 

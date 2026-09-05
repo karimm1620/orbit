@@ -337,12 +337,96 @@ If a simpler implementation conflicts with `SECURITY.md`, choose the safer bound
 
 ---
 
+## ADR-018 — Graph history uses native Git with an opaque frontier cursor
+
+**Status:** Accepted
+
+### Decision
+
+Acquire graph commits with a bounded, NUL-framed `git log --topo-order` query. Acquire local
+branches, remote-tracking branches, and tags once per history session with a separate bounded
+`git for-each-ref` query.
+
+Pagination is a Rust-owned session containing unresolved full-OID frontier tips and already-emitted
+OIDs. React receives only an opaque cursor and cannot supply revision expressions.
+
+### Why
+
+- topological order supplies the parent-after-child invariant needed by the lane reducer
+- `for-each-ref` preserves ref kinds, symbolic refs, and annotated-tag peeling without parsing
+  decoration text
+- frontier paging advances from unfinished history lines instead of repeatedly traversing an
+  ever-growing skipped prefix
+- a session snapshot prevents ref changes from silently altering the meaning of later pages
+
+### Consequences
+
+- initial pages default to 100 commits, requests are clamped to 200, active frontier tips are
+  capped at 512, and sessions stop at 1,000 loaded commits until the renderer/virtualization gate
+  is measured; bound failures are explicit rather than silently truncating graph lines
+- explicit refresh creates a new history session
+- the M1 history capability requires Git's `--no-lazy-fetch` support; unsupported Git versions
+  retain the M0 snapshot but receive a structured graph error
+- exact command and model details live in `M1_COMMIT_GRAPH_RESEARCH.md`
+
+---
+
+## ADR-019 — Git topology is a pure frontend model rendered with DOM and SVG
+
+**Status:** Accepted
+
+### Decision
+
+Rust returns semantic commits, parent OIDs, refs, and cursor state. A deterministic pure TypeScript
+reducer assigns stable lane identities and per-row edge geometry while carrying continuation state
+between pages.
+
+Render each commit as an accessible fixed-height DOM row. Use a narrow, presentation-only SVG in
+that row for graph nodes and edges.
+
+### Why
+
+- renderer coordinates are not Git domain data
+- normal DOM retains text selection, focus, keyboard behavior, semantics, and straightforward tests
+- SVG handles merge curves and high-DPI scaling without Canvas redraw, hit-testing, or duplicate
+  accessibility infrastructure
+- per-row geometry supports incremental append and future fixed-row windowing
+
+### Consequences
+
+- visual topology must not be the only accessible source of HEAD, refs, or merge information
+- lane IDs remain stable across pages even when visual columns compact
+- Canvas remains an evidence-driven fallback, not an initial dependency
+
+---
+
+## ADR-020 — Defer commit-list virtualization until profiling
+
+**Status:** Accepted
+
+### Decision
+
+Do not add a virtualization dependency for the initial 100-row graph page. Profile 100, 500, and
+1,000 loaded rows on a recorded Linux environment before M1 acceptance.
+
+Require fixed-row windowing if any of three release-mode runs at 1,000 rows on the recorded primary
+Linux hardware shows a 95th-percentile scroll frame interval above 16.7 ms or a 95th-percentile
+selection-to-next-paint latency above 100 ms. A profiler-confirmed DOM/layout interaction stall is
+also sufficient evidence. Review a library against a small internal fixed-row window only after
+that evidence exists.
+
+### Consequences
+
+- no large-repository performance claim is made by this decision
+- fixed row height and renderer/model separation are required now so windowing can be added later
+- unbounded DOM accumulation is not approved
+
+---
+
 ## Deferred decisions
 
 The following are intentionally not locked yet:
 
-- graph renderer: DOM/SVG/canvas/custom
-- virtualization library
 - file-watching library
 - syntax highlighter
 - state/query library
