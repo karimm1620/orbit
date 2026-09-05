@@ -30,7 +30,7 @@ git --no-pager --no-lazy-fetch --no-optional-locks \
   -c log.showSignature=false \
   log --topo-order --no-decorate --no-notes --no-patch \
   --no-ext-diff --no-textconv --encoding=UTF-8 \
-  --max-count=<rust-clamped-limit> \
+  --max-count=<rust-validated-limit> \
   --format=%H%x00%h%x00%P%x00%an%x00%at%x00%ct%x00%s \
   -z <rust-owned-frontier-oid>... --
 ```
@@ -132,19 +132,20 @@ For each page:
 
 1. run the history command from every unresolved frontier tip
 2. discard any already-emitted OID defensively
-3. return at most the Rust-clamped page size
+3. return at most the Rust-validated page size
 4. retain input frontier tips that were not emitted
 5. add parents of emitted commits that have not been emitted
 6. deduplicate the next frontier by full OID while preserving deterministic order
 
 This state is necessary because a bounded page may end while multiple independent histories are
 still active. The frontend cannot provide arbitrary revision expressions: it sends only
-`repositoryId`, an opaque `cursor`, and an optional requested limit that Rust clamps. Initial M1
-defaults are 100 commits per page with a hard maximum of 200 per request, 512 active frontier tips,
-and 1,000 loaded commits per initial session. Exceeding a bound returns a structured unsupported or
-too-large state; it never silently drops history lines. Process output and session state remain
-bounded, and implementation must also expire sessions. The 1,000-commit ceiling is revisited only
-after the virtualization/profile gate.
+`repositoryId`, an opaque `cursor`, and an optional requested limit that Rust validates. B1 defaults
+to 100 commits per page, accepts 1 through 200 per request, caps the frontier at 512 active tips,
+and stops at 1,000 loaded commits per session. Exceeding a bound returns a structured request,
+unsupported, or too-large state; it never silently drops history lines. The implemented registry
+keeps at most eight process-local sessions, expires them after 15 minutes idle, evicts the oldest
+session at the active bound, and rotates a single-use cursor after each successful page. The
+1,000-commit ceiling is revisited only after the virtualization/profile gate.
 
 An explicit refresh starts a new session and new ref snapshot. It does not splice changed refs into
 an existing traversal. This gives each paging session a coherent view even if Git changes between
@@ -157,29 +158,29 @@ correctness experiment, not a large-repository performance claim.
 
 ## 5. Typed graph model
 
-The purpose-specific IPC is conceptually:
+The B1 purpose-specific IPC is:
 
 ```ts
-getCommitGraphPage(input: {
-  repositoryId: string;
-  cursor: string | null;
-  limit?: number;
-}): Promise<CommitGraphPage>;
+getCommitHistoryPage(
+  repositoryId: RepositoryId,
+  cursor?: HistoryCursor | null,
+  pageSize?: number,
+): Promise<CommitHistoryPage>;
 ```
 
 The response model is:
 
 ```ts
-type CommitGraphPage = {
+type CommitHistoryPage = {
   commits: GraphCommit[];
-  refs: GraphRef[]; // populated on the first page of a session
-  head: {
-    oid: string | null;
-    branch: string | null;
-    detached: boolean;
-  };
-  nextCursor: string | null;
+  refs: CommitRef[]; // populated on the first page of a session
+  head:
+    | { state: "attached"; branch: string; oid: string }
+    | { state: "detached"; oid: string }
+    | { state: "unborn"; branch: string };
+  nextCursor: HistoryCursor | null;
   hasMore: boolean;
+  sessionLimitReached: boolean;
 };
 
 type GraphCommit = {
@@ -192,8 +193,13 @@ type GraphCommit = {
   committedTimestamp: number;
 };
 
-type GraphRef = {
-  kind: "localBranch" | "remoteBranch" | "tag";
+type CommitRef = {
+  kind:
+    | "localBranch"
+    | "remoteTrackingBranch"
+    | "lightweightTag"
+    | "annotatedTag"
+    | "symbolicRef";
   fullName: string;
   displayName: string;
   targetOid: string;
@@ -336,14 +342,14 @@ No dependency is selected or installed in this phase.
 
 ## 11. Implementation handoff
 
-The next M1 phase should proceed in this order:
+M1 B1 completed the Rust history-session state, structured parsers, ref mapping, capability probe,
+purpose-specific typed IPC, and temporary real-repository integration fixtures. B2 should proceed in
+this order:
 
-1. add Rust history-session state, structured parsers, ref mapping, capability probe, and temporary
-   real-repository integration fixtures
-2. add the narrow typed `get_commit_graph_page` IPC and TypeScript mirror types
-3. implement and unit-test the pure lane reducer using the documented fixtures
-4. implement the accessible DOM-row + SVG-strip renderer and incremental loading states
-5. profile the defined row counts before deciding whether windowing is needed
+1. consume `get_commit_history_page` from the M1 graph state layer
+2. implement and unit-test the pure lane reducer using the documented fixtures
+3. implement the accessible DOM-row + SVG-strip renderer and incremental loading states
+4. profile the defined row counts before deciding whether windowing is needed
 
 Do not add commit mutation, branch mutation, diff rendering, provider APIs, persistence, file
 watching, or final visual polish as part of that slice.

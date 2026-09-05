@@ -281,7 +281,7 @@ Good direction:
 ```text
 select_repository()
 get_repository_snapshot(repository_id)
-get_history(repository_id, cursor)
+get_commit_history_page(repository_id, cursor, page_size)
 get_file_diff(repository_id, file_id)
 stage_file(repository_id, file_id)
 switch_branch(repository_id, branch_name)
@@ -470,7 +470,7 @@ M1 locks the following split:
 ```text
 native Git log + for-each-ref
         ↓ bounded NUL-framed parsers
-Rust CommitGraphPage + opaque frontier cursor
+Rust CommitHistoryPage + opaque frontier cursor
         ↓ purpose-specific typed IPC
 pure frontend lane reducer + carried continuation state
         ↓
@@ -483,10 +483,18 @@ branches, remote-tracking branches, tags, and HEAD. Ref metadata comes from a se
 parsed from decoration text.
 
 Pagination advances an opaque Rust-owned frontier of unresolved full OIDs. It does not use an
-ever-growing `--skip` value and never accepts frontend revision expressions. The initial policy is
-100 commits per page, at most 200 per request, at most 512 active frontier tips, and at most 1,000
-loaded commits per history session. Exceeding a bound is explicit, never silent truncation.
-Refreshing creates a new coherent ref/history session.
+ever-growing `--skip` value and never accepts frontend revision expressions. The implemented policy
+defaults to 100 commits per page, accepts 1 through 200 per request, caps the active frontier at 512
+tips, and stops a session at 1,000 loaded commits with an explicit limit flag. Invalid request sizes
+and bound failures are structured errors, never silent truncation.
+
+Sessions are process-local, bound to the opaque repository ID and its revalidated canonical root,
+limited to eight active entries, and expired after 15 minutes idle. Each continuation consumes its
+cursor and returns a rotated cursor. The oldest session is evicted when the active-session bound is
+reached. A process restart, unknown/reused cursor, repository mismatch, repository disappearance,
+or changed root identity requires a new session. External HEAD/ref movement does not change an
+existing session: its starting HEAD and commit-bearing ref tips remain the traversal snapshot, and
+typed refs are returned only on its first page. Explicit refresh starts a new snapshot.
 
 The frontend derives graph lanes from semantic parent relationships. Lane identity is stable and
 monotonic across appended pages; visual columns may compact when lanes close. First-parent

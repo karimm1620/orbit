@@ -3,6 +3,9 @@ import { invoke } from "@tauri-apps/api/core";
 declare const repositoryIdBrand: unique symbol;
 export type RepositoryId = string & { readonly [repositoryIdBrand]: true };
 
+declare const historyCursorBrand: unique symbol;
+export type HistoryCursor = string & { readonly [historyCursorBrand]: true };
+
 export type RepositorySnapshot = {
   repositoryId: RepositoryId;
   root: string;
@@ -41,6 +44,45 @@ export type OrbitError = {
   details?: string;
 };
 
+export type GraphCommit = {
+  oid: string;
+  shortOid: string;
+  parentOids: string[];
+  subject: string;
+  authorName: string;
+  authorTimestamp: number;
+  committedTimestamp: number;
+};
+
+export type CommitRefKind =
+  | "localBranch"
+  | "remoteTrackingBranch"
+  | "lightweightTag"
+  | "annotatedTag"
+  | "symbolicRef";
+
+export type CommitRef = {
+  kind: CommitRefKind;
+  fullName: string;
+  displayName: string;
+  targetOid: string;
+  symbolicTarget: string | null;
+};
+
+export type CommitHistoryHead =
+  | { state: "attached"; branch: string; oid: string }
+  | { state: "detached"; oid: string }
+  | { state: "unborn"; branch: string };
+
+export type CommitHistoryPage = {
+  commits: GraphCommit[];
+  refs: CommitRef[];
+  head: CommitHistoryHead;
+  nextCursor: HistoryCursor | null;
+  hasMore: boolean;
+  sessionLimitReached: boolean;
+};
+
 export function selectRepository(): Promise<RepositorySnapshot | null> {
   return invoke<RepositorySnapshot | null>("select_repository");
 }
@@ -50,6 +92,18 @@ export function getRepositorySnapshot(
 ): Promise<RepositorySnapshot> {
   return invoke<RepositorySnapshot>("get_repository_snapshot", {
     repositoryId,
+  });
+}
+
+export function getCommitHistoryPage(
+  repositoryId: RepositoryId,
+  cursor: HistoryCursor | null = null,
+  pageSize?: number,
+): Promise<CommitHistoryPage> {
+  return invoke<CommitHistoryPage>("get_commit_history_page", {
+    repositoryId,
+    cursor,
+    pageSize,
   });
 }
 

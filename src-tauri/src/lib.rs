@@ -1,6 +1,7 @@
 mod commands;
 mod error;
 mod git;
+mod history_sessions;
 mod repository;
 
 use std::sync::Arc;
@@ -14,7 +15,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::select_repository,
-            commands::get_repository_snapshot
+            commands::get_repository_snapshot,
+            commands::get_commit_history_page
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -175,11 +175,13 @@ The M0 boundary exposes only `select_repository` and `get_repository_snapshot` t
 
 ### M1 read-only graph boundary
 
-M1 adds only the proposed purpose-specific `get_commit_graph_page` domain operation. It accepts an
-opaque authorized repository ID, an opaque Rust-issued cursor, and a Rust-clamped page size. It does
-not accept paths, Git argument arrays, ref expressions, or arbitrary object expressions from React.
+M1 B1 adds only the purpose-specific `get_commit_history_page` domain operation. It accepts an
+opaque authorized repository ID, an optional opaque Rust-issued cursor, and an optional bounded
+page size. It does not accept paths, Git argument arrays, ref expressions, or arbitrary object
+expressions from React. A new request without a cursor starts a coherent history/ref session;
+continuations are single-use and remain bound to the same authorized repository root.
 
-Graph acquisition remains inside the existing `GitRunner`. The history command must explicitly use:
+Graph acquisition remains inside the existing `GitRunner`. The history command explicitly uses:
 
 - `--no-pager`
 - `--no-lazy-fetch`
@@ -187,15 +189,22 @@ Graph acquisition remains inside the existing `GitRunner`. The history command m
 - `-c log.showSignature=false`
 - `--no-decorate --no-notes --no-patch --no-ext-diff --no-textconv`
 
-`--no-lazy-fetch` is capability-probed because it was added in Git 2.45. If it is unavailable, M1
-graph acquisition fails closed with a structured unsupported-state error rather than risking an
-implicit network request, credential-helper invocation, remote helper, or fetch hook in a partial
-clone. M0 repository status remains usable.
+`--no-lazy-fetch` is capability-probed once per shared runner because it was added in Git 2.45. If
+it is unavailable, M1 graph acquisition fails closed with a structured capability error rather
+than risking an implicit network request, credential-helper invocation, remote helper, or fetch
+hook in a partial clone. M0 repository status remains usable.
 
 Refs come from a separate bounded `for-each-ref` call under the same no-pager, no-lazy-fetch,
 no-optional-locks process policy. Both parsers validate fixed framing and treat all commit/ref text
 as untrusted. SVG graph marks are presentation-only; repository-controlled text remains ordinary
 escaped React text and is never interpreted as HTML, a URL, or executable content.
+
+History sessions contain only bounded semantic traversal state. They expire after 15 minutes idle,
+are capped at eight active sessions, rotate their cursor after every successful page, and stop at
+1,000 emitted commits. The cursor is opaque transport state, not a replacement for repository
+authorization: Rust also revalidates the repository ID and canonical root on every request. If the
+root becomes unavailable or resolves differently, all sessions for that repository ID are
+invalidated. No Tauri capability was added for B1; the WebView retains only `core:default`.
 
 ---
 

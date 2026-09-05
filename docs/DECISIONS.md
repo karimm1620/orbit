@@ -361,7 +361,7 @@ OIDs. React receives only an opaque cursor and cannot supply revision expression
 
 ### Consequences
 
-- initial pages default to 100 commits, requests are clamped to 200, active frontier tips are
+- initial pages default to 100 commits, requests above 200 are rejected, active frontier tips are
   capped at 512, and sessions stop at 1,000 loaded commits until the renderer/virtualization gate
   is measured; bound failures are explicit rather than silently truncating graph lines
 - explicit refresh creates a new history session
@@ -420,6 +420,44 @@ that evidence exists.
 - no large-repository performance claim is made by this decision
 - fixed row height and renderer/model separation are required now so windowing can be added later
 - unbounded DOM accumulation is not approved
+
+---
+
+## ADR-021 — History sessions use bounded process-local rotating cursors
+
+**Status:** Accepted
+
+### Decision
+
+Expose `get_commit_history_page(repository_id, cursor, page_size)` as the sole B1 history IPC.
+Omitting the cursor starts a session and snapshots semantic HEAD, typed refs, and their commit tips.
+Each successful continuation consumes its cursor and issues a new opaque cursor.
+
+Keep at most eight active sessions, expire sessions after 15 minutes idle, and evict the least
+recently accessed session when inserting beyond the active bound. Page size defaults to 100 and
+must be between 1 and 200; invalid values are rejected with a structured error. A session stops at
+1,000 emitted commits and reports whether unresolved history remains.
+
+Bind every session to its authorized repository ID and canonical root. A process restart,
+unknown/expired/reused cursor, repository mismatch, unavailable repository, or changed root
+identity invalidates continuation. Later HEAD/ref movement does not alter the captured traversal;
+explicit refresh starts a new snapshot. Typed refs are emitted only on the first page.
+
+### Why
+
+- rotating single-use cursors make invalid state transitions deterministic without exposing Git
+  revision expressions
+- bounded process-local state needs no database and cannot grow without a fixed ceiling
+- retaining the starting frontier prevents unrelated repository changes from silently splicing
+  different topology into later pages
+- repository/root binding preserves the M0 authorization boundary
+
+### Consequences
+
+- cursors are opaque handles, not authorization secrets; the repository ID/root binding is always
+  checked as well
+- session state intentionally does not survive an application restart
+- eviction or expiry is recoverable by starting a fresh history request
 
 ---
 

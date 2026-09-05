@@ -72,6 +72,39 @@ impl OrbitError {
         }
     }
 
+    pub fn git_capability_unavailable() -> Self {
+        Self {
+            code: "git_capability_unavailable",
+            title: "Git needs an update",
+            message: "Secure commit-history loading requires a Git version that supports disabling lazy object fetching.".into(),
+            operation: "detect_git_capabilities",
+            recoverable: true,
+            details: None,
+        }
+    }
+
+    pub fn history_session_unavailable() -> Self {
+        Self {
+            code: "history_session_unavailable",
+            title: "Commit history needs to restart",
+            message: "This commit-history session is invalid, expired, or has already advanced. Refresh history to start again.".into(),
+            operation: "read_commit_history",
+            recoverable: true,
+            details: None,
+        }
+    }
+
+    pub fn invalid_history_request(message: impl Into<String>) -> Self {
+        Self {
+            code: "invalid_history_request",
+            title: "Commit history request is invalid",
+            message: message.into(),
+            operation: "read_commit_history",
+            recoverable: true,
+            details: None,
+        }
+    }
+
     pub fn git_failed(operation: &'static str, stderr: &[u8]) -> Self {
         let detail = String::from_utf8_lossy(stderr);
         let detail = sanitize_diagnostic(detail.trim());
@@ -91,7 +124,7 @@ impl OrbitError {
         Self {
             code: "git_command_failed",
             title: "Repository response is too large",
-            message: "Git returned more data than Orbit's bounded M0 reader accepts.".into(),
+            message: "Git returned more data than Orbit's bounded reader accepts.".into(),
             operation,
             recoverable: true,
             details: None,

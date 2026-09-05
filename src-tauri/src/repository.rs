@@ -16,6 +16,7 @@ use crate::{
         read_recent_commits, read_status, CommitSummary, GitRunner, HeadSnapshot,
         WorkingTreeSnapshot,
     },
+    history_sessions::{CommitHistoryPage, CommitHistoryRegistry},
 };
 
 const REPOSITORY_PROBE_LIMIT: usize = 16 * 1024;
@@ -35,6 +36,7 @@ pub struct RepositoryRegistry {
     roots: RwLock<HashMap<String, PathBuf>>,
     next_id: AtomicU64,
     runner: GitRunner,
+    histories: CommitHistoryRegistry,
 }
 
 impl Default for RepositoryRegistry {
@@ -43,6 +45,7 @@ impl Default for RepositoryRegistry {
             roots: RwLock::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             runner: GitRunner::default(),
+            histories: CommitHistoryRegistry::default(),
         }
     }
 }
@@ -73,6 +76,29 @@ impl RepositoryRegistry {
     }
 
     pub fn snapshot(&self, repository_id: &str) -> Result<RepositorySnapshot, OrbitError> {
+        let root = self.authorized_root(repository_id)?;
+        build_snapshot(&self.runner, repository_id.to_owned(), &root)
+    }
+
+    pub fn commit_history_page(
+        &self,
+        repository_id: &str,
+        cursor: Option<&str>,
+        page_size: Option<i64>,
+    ) -> Result<CommitHistoryPage, OrbitError> {
+        let root = self.authorized_root(repository_id)?;
+        self.runner.require_no_lazy_fetch()?;
+        if let Some(cursor) = cursor {
+            self.histories
+                .load_more(&self.runner, repository_id, &root, cursor, page_size)
+        } else {
+            let status = read_status(&self.runner, &root)?;
+            self.histories
+                .start(&self.runner, repository_id, &root, &status.head, page_size)
+        }
+    }
+
+    fn authorized_root(&self, repository_id: &str) -> Result<PathBuf, OrbitError> {
         if !valid_repository_id(repository_id) {
             return Err(OrbitError::repository_unavailable(
                 "This repository is no longer authorized in the current Orbit session.",
@@ -92,23 +118,31 @@ impl RepositoryRegistry {
                     "This repository is no longer authorized in the current Orbit session.",
                 )
             })?;
-        let resolved = resolve_repository(&self.runner, &root).map_err(|error| {
-            if error.code == "not_a_repository" {
-                OrbitError::repository_unavailable(
-                    "The opened directory is no longer an available Git working tree.",
-                )
-            } else {
-                error
+        let resolved = match resolve_repository(&self.runner, &root) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                let error = if error.code == "not_a_repository" {
+                    OrbitError::repository_unavailable(
+                        "The opened directory is no longer an available Git working tree.",
+                    )
+                } else {
+                    error
+                };
+                if error.code == "repository_unavailable" {
+                    self.histories.invalidate_repository(repository_id)?;
+                }
+                return Err(error);
             }
-        })?;
+        };
 
         if resolved != root {
+            self.histories.invalidate_repository(repository_id)?;
             return Err(OrbitError::repository_unavailable(
                 "The opened repository now resolves to a different working tree.",
             ));
         }
 
-        build_snapshot(&self.runner, repository_id.to_owned(), &root)
+        Ok(root)
     }
 
     fn next_repository_id(&self) -> String {
@@ -242,8 +276,14 @@ fn build_snapshot(
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::HashSet,
         sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use crate::git::{
+        history_starting_tips, read_graph_commits, read_object_format, CommitHistoryHead,
+        CommitRefKind,
     };
 
     use super::*;
@@ -284,6 +324,10 @@ mod tests {
         }
 
         fn git_ok<const N: usize>(&self, args: [&str; N]) {
+            self.git_output(args);
+        }
+
+        fn git_output<const N: usize>(&self, args: [&str; N]) -> String {
             let output = GitRunner::default()
                 .run(Some(&self.root), "test_fixture", args, 1024 * 1024)
                 .expect("run fixture git command");
@@ -292,6 +336,14 @@ mod tests {
                 "fixture git command failed: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
+            String::from_utf8(output.stdout)
+                .expect("fixture output should be UTF-8")
+                .trim_end_matches(['\r', '\n'])
+                .to_owned()
+        }
+
+        fn oid(&self, revision: &str) -> String {
+            self.git_output(["rev-parse", "--verify", revision])
         }
 
         fn git_failure<const N: usize>(&self, args: [&str; N]) {
@@ -442,12 +494,299 @@ mod tests {
             .with_environment("GIT_DIR", redirected.root.join(".git").into_os_string())
             .with_environment("GIT_WORK_TREE", redirected.root.clone().into_os_string());
 
-        let snapshot = RepositoryRegistry::with_runner(runner)
+        let registry = RepositoryRegistry::with_runner(runner);
+        let snapshot = registry
             .open(selected.root.clone())
             .expect("open selected repository");
 
         assert_eq!(snapshot.root, selected.root.to_string_lossy());
         assert_eq!(snapshot.recent_commits[0].subject, "Selected repository");
+        let history = registry
+            .commit_history_page(&snapshot.repository_id, None, Some(1))
+            .expect("read selected repository history");
+        assert_eq!(history.commits[0].subject, "Selected repository");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn history_does_not_execute_configured_signature_verification() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let repository = TestRepository::new();
+        repository.commit_file("tracked.txt", "base\n", "Base");
+        let parent = repository.oid("HEAD");
+        let tree = repository.git_output(["rev-parse", "HEAD^{tree}"]);
+        let raw_commit = format!(
+            "tree {tree}\n\
+             parent {parent}\n\
+             author Orbit Tests <orbit@example.test> 1700000000 +0000\n\
+             committer Orbit Tests <orbit@example.test> 1700000000 +0000\n\
+             gpgsig -----BEGIN PGP SIGNATURE-----\n\
+              invalid test signature\n\
+              -----END PGP SIGNATURE-----\n\
+             \n\
+             Signed fixture\n"
+        );
+        repository.write("signed-commit-object", &raw_commit);
+        let signed_oid = repository.git_output([
+            "hash-object",
+            "-t",
+            "commit",
+            "-w",
+            "--",
+            "signed-commit-object",
+        ]);
+        repository.git_ok(["update-ref", "refs/heads/main", signed_oid.as_str()]);
+
+        let marker = repository.root.join("signature-verifier-ran");
+        let verifier = repository.root.join("fake-gpg");
+        repository.write(
+            "fake-gpg",
+            &format!("#!/bin/sh\n: > '{}'\nexit 1\n", marker.display()),
+        );
+        let mut permissions = fs::metadata(&verifier)
+            .expect("signature verifier metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&verifier, permissions).expect("make verifier executable");
+        let verifier = verifier.to_str().expect("UTF-8 verifier path");
+        repository.git_ok(["config", "gpg.program", verifier]);
+        repository.git_ok(["config", "log.showSignature", "true"]);
+
+        let unprotected = GitRunner::default()
+            .run(
+                Some(&repository.root),
+                "test_unprotected_history",
+                ["--no-pager", "log", "-1", "--format=%H", "HEAD", "--"],
+                1024 * 1024,
+            )
+            .expect("run unprotected history fixture");
+        assert!(unprotected.status.success());
+        assert!(marker.exists(), "fixture verifier was not executed");
+        fs::remove_file(&marker).expect("remove signature marker");
+
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open signed history repository");
+        registry
+            .commit_history_page(&opened.repository_id, None, Some(1))
+            .expect("read protected commit history");
+
+        assert!(!marker.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn graph_history_does_not_execute_textconv_or_external_diff_programs() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let repository = TestRepository::new();
+        repository.write(".gitattributes", "tracked.txt diff=orbit-test\n");
+        repository.write("tracked.txt", "base\n");
+        repository.git_ok(["add", "--", ".gitattributes", "tracked.txt"]);
+        repository.git_ok(["commit", "-m", "Base"]);
+        repository.commit_file("tracked.txt", "next\n", "Change tracked file");
+
+        let textconv_marker = repository.root.join("textconv-ran");
+        let textconv = repository.root.join("fake-textconv");
+        repository.write(
+            "fake-textconv",
+            &format!(
+                "#!/bin/sh\n: > '{}'\ncat \"$1\"\n",
+                textconv_marker.display()
+            ),
+        );
+        let mut permissions = fs::metadata(&textconv)
+            .expect("textconv metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&textconv, permissions).expect("make textconv executable");
+        repository.git_ok([
+            "config",
+            "diff.orbit-test.textconv",
+            textconv.to_str().expect("UTF-8 textconv path"),
+        ]);
+
+        let unsafe_textconv = GitRunner::default()
+            .run(
+                Some(&repository.root),
+                "test_unprotected_textconv",
+                ["--no-pager", "log", "-p", "--textconv", "-1", "HEAD", "--"],
+                1024 * 1024,
+            )
+            .expect("run unprotected textconv fixture");
+        assert!(unsafe_textconv.status.success());
+        assert!(
+            textconv_marker.exists(),
+            "fixture textconv was not executed"
+        );
+        fs::remove_file(&textconv_marker).expect("remove textconv marker");
+
+        let external_marker = repository.root.join("external-diff-ran");
+        let external_diff = repository.root.join("fake-external-diff");
+        repository.write(
+            "fake-external-diff",
+            &format!("#!/bin/sh\n: > '{}'\nexit 0\n", external_marker.display()),
+        );
+        let mut permissions = fs::metadata(&external_diff)
+            .expect("external diff metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&external_diff, permissions).expect("make external diff executable");
+        repository.git_ok([
+            "config",
+            "diff.external",
+            external_diff.to_str().expect("UTF-8 external diff path"),
+        ]);
+
+        let unsafe_external_diff = GitRunner::default()
+            .run(
+                Some(&repository.root),
+                "test_unprotected_external_diff",
+                ["--no-pager", "log", "-p", "--ext-diff", "-1", "HEAD", "--"],
+                1024 * 1024,
+            )
+            .expect("run unprotected external diff fixture");
+        assert!(unsafe_external_diff.status.success());
+        assert!(
+            external_marker.exists(),
+            "fixture external diff was not executed"
+        );
+        fs::remove_file(&external_marker).expect("remove external diff marker");
+
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open configured repository");
+        registry
+            .commit_history_page(&opened.repository_id, None, Some(2))
+            .expect("read protected graph history");
+
+        assert!(!textconv_marker.exists());
+        assert!(!external_marker.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_reads_do_not_execute_configured_fsmonitor_programs() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let repository = TestRepository::new();
+        repository.commit_file("tracked.txt", "base\n", "Base");
+
+        let fsmonitor_marker = repository.root.join("fsmonitor-ran");
+        let fsmonitor = repository.root.join("fake-fsmonitor");
+        repository.write(
+            "fake-fsmonitor",
+            &format!("#!/bin/sh\n: > '{}'\nexit 0\n", fsmonitor_marker.display()),
+        );
+        let mut permissions = fs::metadata(&fsmonitor)
+            .expect("fsmonitor metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fsmonitor, permissions).expect("make fsmonitor executable");
+        repository.git_ok([
+            "config",
+            "core.fsmonitor",
+            fsmonitor.to_str().expect("UTF-8 fsmonitor path"),
+        ]);
+
+        let unsafe_status = GitRunner::default()
+            .run(
+                Some(&repository.root),
+                "test_unprotected_fsmonitor",
+                ["--no-optional-locks", "status", "--porcelain=v2", "-z"],
+                1024 * 1024,
+            )
+            .expect("run unprotected fsmonitor fixture");
+        assert!(unsafe_status.status.success());
+        assert!(
+            fsmonitor_marker.exists(),
+            "fixture fsmonitor was not executed"
+        );
+        fs::remove_file(&fsmonitor_marker).expect("remove fsmonitor marker");
+
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open configured repository");
+        registry
+            .commit_history_page(&opened.repository_id, None, Some(1))
+            .expect("read protected graph history");
+
+        assert!(!fsmonitor_marker.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn graph_history_does_not_lazy_fetch_missing_promisor_objects() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let repository = TestRepository::new();
+        repository.commit_file("tracked.txt", "base\n", "Base");
+        let missing_oid = repository.oid("HEAD");
+        let object_path = repository
+            .root
+            .join(".git/objects")
+            .join(&missing_oid[..2])
+            .join(&missing_oid[2..]);
+        assert!(object_path.is_file(), "fixture commit should be loose");
+
+        let marker = repository.root.join("lazy-fetch-ran");
+        let remote = repository.root.join("fake-promisor-remote");
+        repository.write(
+            "fake-promisor-remote",
+            &format!("#!/bin/sh\n: > '{}'\nexit 1\n", marker.display()),
+        );
+        let mut permissions = fs::metadata(&remote)
+            .expect("promisor remote metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&remote, permissions).expect("make promisor remote executable");
+        repository.git_ok(["config", "core.repositoryformatversion", "1"]);
+        repository.git_ok(["config", "extensions.partialClone", "origin"]);
+        repository.git_ok(["config", "remote.origin.promisor", "true"]);
+        repository.git_ok(["config", "remote.origin.partialclonefilter", "blob:none"]);
+        repository.git_ok([
+            "config",
+            "remote.origin.url",
+            &format!("ext::{}", remote.display()),
+        ]);
+        repository.git_ok(["config", "protocol.ext.allow", "always"]);
+        fs::remove_file(&object_path).expect("remove promised commit object");
+
+        let unsafe_history = GitRunner::default()
+            .without_no_lazy_fetch_environment()
+            .run(
+                Some(&repository.root),
+                "test_unprotected_lazy_fetch",
+                [
+                    "--no-pager",
+                    "log",
+                    "-1",
+                    "--format=%H",
+                    missing_oid.as_str(),
+                    "--",
+                ],
+                1024 * 1024,
+            )
+            .expect("run unprotected lazy-fetch fixture");
+        assert!(!unsafe_history.status.success());
+        assert!(marker.exists(), "fixture promisor remote was not executed");
+        fs::remove_file(&marker).expect("remove lazy-fetch marker");
+
+        let error = read_graph_commits(
+            &GitRunner::default(),
+            &repository.root,
+            &[missing_oid],
+            1,
+            crate::git::ObjectFormat::Sha1,
+        )
+        .expect_err("missing promised object should fail without fetching");
+
+        assert_eq!(error.code, "git_command_failed");
+        assert!(!marker.exists());
     }
 
     #[test]
@@ -524,5 +863,303 @@ mod tests {
             .expect_err("missing executable");
 
         assert_eq!(error.code, "git_not_found");
+    }
+
+    #[test]
+    fn reads_paginated_nonlinear_history_and_typed_refs() {
+        let repository = TestRepository::new();
+        repository.commit_file("base.txt", "base\n", "Base");
+        let base_oid = repository.oid("HEAD");
+
+        repository.git_ok(["checkout", "-b", "feature-one"]);
+        repository.commit_file("feature-one.txt", "feature one\n", "Feature one");
+        repository.git_ok(["checkout", "main"]);
+        repository.commit_file("main-one.txt", "main one\n", "Main one");
+        repository.git_ok(["merge", "--no-ff", "feature-one", "-m", "Merge one"]);
+
+        repository.git_ok(["checkout", "-b", "feature-two"]);
+        repository.commit_file("feature-two.txt", "feature two\n", "Feature two");
+        repository.git_ok(["checkout", "main"]);
+        repository.git_ok(["checkout", "-b", "feature-three"]);
+        repository.commit_file("feature-three.txt", "feature three\n", "Feature three");
+        repository.git_ok(["checkout", "main"]);
+        repository.git_ok([
+            "merge",
+            "--no-ff",
+            "feature-two",
+            "feature-three",
+            "-m",
+            "Octopus merge",
+        ]);
+
+        repository.git_ok(["checkout", "-b", "nested"]);
+        repository.commit_file("nested.txt", "nested\n", "Nested branch");
+        repository.git_ok(["checkout", "main"]);
+        repository.commit_file("main-two.txt", "main two\n", "Main two");
+        repository.git_ok(["merge", "--no-ff", "nested", "-m", "Merge two"]);
+        let tip_oid = repository.oid("HEAD");
+
+        repository.git_ok(["branch", "naïve/topic", base_oid.as_str()]);
+        repository.git_ok(["tag", "lightweight", tip_oid.as_str()]);
+        repository.git_ok([
+            "tag",
+            "-a",
+            "annotated/β",
+            "-m",
+            "Annotated tag",
+            base_oid.as_str(),
+        ]);
+        repository.git_ok(["update-ref", "refs/remotes/origin/main", tip_oid.as_str()]);
+        repository.git_ok([
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ]);
+        repository.git_ok(["checkout", "--detach", "HEAD"]);
+
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open history repository");
+        let first = registry
+            .commit_history_page(&opened.repository_id, None, Some(2))
+            .expect("first history page");
+
+        assert!(matches!(first.head, CommitHistoryHead::Detached { .. }));
+        assert!(first.refs.iter().any(|commit_ref| {
+            commit_ref.kind == CommitRefKind::LocalBranch
+                && commit_ref.display_name == "naïve/topic"
+        }));
+        assert!(first.refs.iter().any(|commit_ref| {
+            commit_ref.kind == CommitRefKind::RemoteTrackingBranch
+                && commit_ref.full_name == "refs/remotes/origin/main"
+        }));
+        assert!(first.refs.iter().any(|commit_ref| {
+            commit_ref.kind == CommitRefKind::SymbolicRef
+                && commit_ref.symbolic_target.as_deref() == Some("refs/remotes/origin/main")
+        }));
+        assert!(first.refs.iter().any(|commit_ref| {
+            commit_ref.kind == CommitRefKind::LightweightTag && commit_ref.target_oid == tip_oid
+        }));
+        assert!(first.refs.iter().any(|commit_ref| {
+            commit_ref.kind == CommitRefKind::AnnotatedTag
+                && commit_ref.display_name == "annotated/β"
+                && commit_ref.target_oid == base_oid
+        }));
+        assert!(
+            first
+                .refs
+                .iter()
+                .filter(|commit_ref| commit_ref.target_oid == tip_oid)
+                .count()
+                >= 3,
+            "multiple refs should be retained on one commit"
+        );
+
+        let object_format = read_object_format(&registry.runner, &repository.root)
+            .expect("read fixture object format");
+        let tips = history_starting_tips(&first.head, &first.refs);
+        let expected_commits = read_graph_commits(
+            &registry.runner,
+            &repository.root,
+            &tips,
+            200,
+            object_format,
+        )
+        .expect("one-shot topological history");
+        assert!(
+            expected_commits
+                .iter()
+                .any(|commit| commit.parent_oids.len() == 3),
+            "fixture should contain an octopus merge"
+        );
+        let expected = expected_commits
+            .into_iter()
+            .map(|commit| commit.oid)
+            .collect::<Vec<_>>();
+
+        let mut actual = first
+            .commits
+            .iter()
+            .map(|commit| commit.oid.clone())
+            .collect::<Vec<_>>();
+        let mut cursor = first.next_cursor;
+        while let Some(current) = cursor {
+            let page = registry
+                .commit_history_page(&opened.repository_id, Some(current.as_str()), Some(2))
+                .expect("next history page");
+            assert!(
+                page.refs.is_empty(),
+                "refs are returned only on session start"
+            );
+            actual.extend(page.commits.iter().map(|commit| commit.oid.clone()));
+            cursor = page.next_cursor;
+        }
+
+        assert_eq!(actual, expected);
+        assert_eq!(actual.iter().collect::<HashSet<_>>().len(), actual.len());
+    }
+
+    #[test]
+    fn represents_unborn_history_without_a_session() {
+        let repository = TestRepository::new();
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open unborn repo");
+
+        let page = registry
+            .commit_history_page(&opened.repository_id, None, None)
+            .expect("read unborn history");
+
+        assert!(matches!(
+            page.head,
+            CommitHistoryHead::Unborn { ref branch } if branch == "main"
+        ));
+        assert!(page.commits.is_empty());
+        assert!(page.refs.is_empty());
+        assert!(!page.has_more);
+        assert!(page.next_cursor.is_none());
+    }
+
+    #[test]
+    fn validates_history_cursors_page_limits_and_single_use() {
+        let repository = TestRepository::new();
+        for index in 0..4 {
+            repository.commit_file(
+                &format!("{index}.txt"),
+                &format!("{index}\n"),
+                &format!("Commit {index}"),
+            );
+        }
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open repository");
+
+        for page_size in [Some(0), Some(201)] {
+            let error = registry
+                .commit_history_page(&opened.repository_id, None, page_size)
+                .expect_err("reject invalid page size");
+            assert_eq!(error.code, "invalid_history_request");
+        }
+        for cursor in ["invalid", "history-000000000000ffff"] {
+            let error = registry
+                .commit_history_page(&opened.repository_id, Some(cursor), Some(1))
+                .expect_err("reject unknown cursor");
+            assert_eq!(error.code, "history_session_unavailable");
+        }
+
+        let first = registry
+            .commit_history_page(&opened.repository_id, None, Some(1))
+            .expect("start history");
+        let cursor = first.next_cursor.expect("continuation cursor");
+
+        let other_repository = TestRepository::new();
+        other_repository.commit_file("other.txt", "other\n", "Other");
+        let other = registry
+            .open(other_repository.root.clone())
+            .expect("open another repository");
+        let unauthorized = registry
+            .commit_history_page(&other.repository_id, Some(cursor.as_str()), Some(1))
+            .expect_err("cursor cannot cross repositories");
+        assert_eq!(unauthorized.code, "history_session_unavailable");
+
+        registry
+            .commit_history_page(&opened.repository_id, Some(cursor.as_str()), Some(1))
+            .expect("consume cursor");
+        let reused = registry
+            .commit_history_page(&opened.repository_id, Some(cursor.as_str()), Some(1))
+            .expect_err("cursor is single-use");
+        assert_eq!(reused.code, "history_session_unavailable");
+
+        let fresh = registry
+            .commit_history_page(&opened.repository_id, None, Some(1))
+            .expect("start expiring history");
+        let expiring_cursor = fresh.next_cursor.expect("expiring cursor");
+        registry.histories.expire_for_test(expiring_cursor.as_str());
+        let expired = registry
+            .commit_history_page(
+                &opened.repository_id,
+                Some(expiring_cursor.as_str()),
+                Some(1),
+            )
+            .expect_err("expired cursor");
+        assert_eq!(expired.code, "history_session_unavailable");
+    }
+
+    #[test]
+    fn keeps_a_session_on_its_original_history_when_head_moves() {
+        let repository = TestRepository::new();
+        for index in 0..4 {
+            repository.commit_file(
+                &format!("before-{index}.txt"),
+                "before\n",
+                &format!("Before {index}"),
+            );
+        }
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open repository");
+        let first = registry
+            .commit_history_page(&opened.repository_id, None, Some(1))
+            .expect("start history");
+        let session_head = first.head.oid().expect("attached HEAD").to_owned();
+        let cursor = first.next_cursor.expect("continuation cursor");
+
+        repository.commit_file("after.txt", "after\n", "After session started");
+        let moved_head = repository.oid("HEAD");
+        assert_ne!(moved_head, session_head);
+
+        let mut paginated = first.commits;
+        let mut cursor = Some(cursor);
+        while let Some(current) = cursor {
+            let page = registry
+                .commit_history_page(&opened.repository_id, Some(current.as_str()), Some(1))
+                .expect("continue original history");
+            assert_eq!(page.head.oid(), Some(session_head.as_str()));
+            paginated.extend(page.commits);
+            cursor = page.next_cursor;
+        }
+
+        assert!(!paginated.iter().any(|commit| commit.oid == moved_head));
+        assert_eq!(paginated.len(), 4);
+    }
+
+    #[test]
+    fn invalidates_history_when_the_authorized_repository_disappears() {
+        let mut repository = TestRepository::new();
+        repository.commit_file("one.txt", "one\n", "One");
+        repository.commit_file("two.txt", "two\n", "Two");
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open repository");
+        let first = registry
+            .commit_history_page(&opened.repository_id, None, Some(1))
+            .expect("start history");
+        let cursor = first.next_cursor.expect("continuation cursor");
+
+        let original = repository.root.clone();
+        let moved = original.with_file_name(format!(
+            "{}-moved",
+            original
+                .file_name()
+                .expect("repository name")
+                .to_string_lossy()
+        ));
+        fs::rename(&original, &moved).expect("move repository");
+        let error = registry
+            .commit_history_page(&opened.repository_id, Some(cursor.as_str()), Some(1))
+            .expect_err("repository unavailable");
+        assert_eq!(error.code, "repository_unavailable");
+        fs::rename(&moved, &original).expect("restore repository");
+        repository.root = original;
+
+        let invalidated = registry
+            .commit_history_page(&opened.repository_id, Some(cursor.as_str()), Some(1))
+            .expect_err("unavailable repository invalidates its sessions");
+        assert_eq!(invalidated.code, "history_session_unavailable");
     }
 }

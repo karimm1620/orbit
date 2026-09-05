@@ -18,42 +18,42 @@
 - [x] Review history/ref commands for configured process and network execution.
 - [x] Record accepted architecture in canonical documentation.
 
-The accepted architecture is in `M1_COMMIT_GRAPH_RESEARCH.md` and ADR-018 through ADR-020.
+The accepted architecture is in `M1_COMMIT_GRAPH_RESEARCH.md` and ADR-018 through ADR-021.
 No product graph UI was implemented during this gate.
 
 ---
 
 ## 1. Native history service
 
-- [ ] Add a purpose-specific Rust commit-graph history service.
-- [ ] Capability-probe `--no-lazy-fetch`; fail closed for graph reads when unsupported.
-- [ ] Query bounded `git log --topo-order` pages through the existing `GitRunner`.
-- [ ] Parse seven-field NUL-framed commit records.
-- [ ] Validate OIDs for the repository object format, parents, timestamps, UTF-8, and bounds.
-- [ ] Cover linear, branch/merge, multiple-merge, octopus, detached, and unborn histories.
-- [ ] Map missing objects and repository changes to structured errors.
+- [x] Add a purpose-specific Rust commit-graph history service.
+- [x] Capability-probe `--no-lazy-fetch`; fail closed for graph reads when unsupported.
+- [x] Query bounded `git log --topo-order` pages through the existing `GitRunner`.
+- [x] Parse seven-field NUL-framed commit records.
+- [x] Validate OIDs for the repository object format, parents, timestamps, UTF-8, and bounds.
+- [x] Cover linear, branch/merge, multiple-merge, octopus, detached, and unborn histories.
+- [x] Map missing objects and repository changes to structured errors.
 
 ---
 
 ## 2. Ref service
 
-- [ ] Query refs once per history session with bounded `git for-each-ref`.
-- [ ] Parse local branches, remote-tracking branches, tags, and symbolic refs.
-- [ ] Peel annotated tags only when they target commits.
-- [ ] Group multiple refs per commit deterministically.
-- [ ] Cover Unicode valid ref names and multiple refs on one commit.
+- [x] Query refs once per history session with bounded `git for-each-ref`.
+- [x] Parse local branches, remote-tracking branches, tags, and symbolic refs.
+- [x] Peel annotated tags only when they target commits.
+- [x] Preserve multiple refs per commit in deterministic refname order.
+- [x] Cover Unicode valid ref names and multiple refs on one commit.
 
 ---
 
 ## 3. Incremental session and typed IPC
 
-- [ ] Add a Rust-owned history session bound to an authorized repository ID.
-- [ ] Keep unresolved frontier OIDs and emitted OIDs behind an opaque cursor.
-- [ ] Default to 100 commits, clamp requests to 200, cap active frontier tips at 512, and cap the initial session at 1,000.
-- [ ] Expire stale history sessions.
-- [ ] Restart the ref/history snapshot on explicit refresh.
-- [ ] Add purpose-specific `get_commit_graph_page` IPC and matching TypeScript types.
-- [ ] Verify React cannot supply paths, Git arguments, or revision expressions.
+- [x] Add a Rust-owned history session bound to an authorized repository ID.
+- [x] Keep unresolved frontier OIDs and emitted OIDs behind an opaque cursor.
+- [x] Default to 100 commits, reject requests above 200, cap active frontier tips at 512, and cap the session at 1,000.
+- [x] Expire stale history sessions and cap the process at eight active sessions.
+- [x] Restart the ref/history snapshot on explicit refresh.
+- [x] Add purpose-specific `get_commit_history_page` IPC and matching TypeScript types.
+- [x] Verify React cannot supply paths, Git arguments, or revision expressions.
 
 ---
 
@@ -93,12 +93,12 @@ No product graph UI was implemented during this gate.
 
 ## 7. Security review
 
-- [ ] Prove graph reads do not invoke signature verification programs.
-- [ ] Prove graph reads do not invoke textconv, external diff, pager, or fsmonitor programs.
-- [ ] Prove partial-clone graph reads do not perform lazy network fetches.
-- [ ] Preserve `core.fsmonitor=false` for status reads.
-- [ ] Confirm no arbitrary frontend Git/filesystem/process capability.
-- [ ] Confirm Tauri capabilities remain least-privilege.
+- [x] Prove graph reads do not invoke signature verification programs.
+- [x] Prove graph reads do not invoke textconv, external diff, pager, or fsmonitor programs.
+- [x] Prove partial-clone graph reads do not perform lazy network fetches.
+- [x] Preserve `core.fsmonitor=false` for status reads.
+- [x] Confirm no arbitrary frontend Git/filesystem/process capability.
+- [x] Confirm Tauri capabilities remain least-privilege.
 - [ ] Render all repository-controlled data as untrusted text.
 
 ---
