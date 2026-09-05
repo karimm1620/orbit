@@ -167,8 +167,8 @@ The M0 boundary exposes only `select_repository` and `get_repository_snapshot` t
 - `select_repository` invokes the official dialog plugin from Rust; no dialog or filesystem plugin permission is granted to frontend code.
 - Successful selection creates a process-local opaque repository ID mapped to the canonical Git work-tree root in Rust.
 - Refresh accepts only that repository ID and revalidates the stored root before reading it.
-- The internal Git runner launches `git` directly with separate arguments, closed stdin, bounded stdout/stderr readers, and no shell.
-- Status reads override `core.fsmonitor=false` for that command so opening a repository cannot invoke a configured filesystem-monitor hook.
+- The internal Git runner launches `git` directly with separate arguments, closed stdin, bounded stdout/stderr readers, and no shell. It removes inherited `GIT_*` environment variables so launch-time repository/config overrides cannot redirect the authorized repository context.
+- Before a status read, Orbit obtains configured filter-driver names through bounded Git config output and overrides each driver's `clean`/`process` command to an empty value with `required=false`. Status also overrides `core.fsmonitor=false`, so opening a repository cannot invoke a configured content-filter program or filesystem-monitor hook.
 - The unused scaffold opener plugin and permission are removed.
 
 ---
@@ -270,6 +270,12 @@ Rules:
 - set environment variables only when required for a documented operation
 - treat repository-provided hooks/config behavior as part of the native Git threat surface
 
+M0 read commands deliberately remove inherited `GIT_*` variables at the child-process
+boundary. This prevents variables such as `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`,
+and command-line config injection variables from changing repository identity or read behavior.
+Future authenticated/mutating operations must explicitly review which Git environment inputs, if
+any, need to be restored rather than inheriting them implicitly.
+
 If Orbit ever needs to disable or alter hooks for a specific operation, that must be an explicit architectural decision rather than an accidental side effect.
 
 ---
@@ -277,6 +283,10 @@ If Orbit ever needs to disable or alter hooks for a specific operation, that mus
 ## 10. Git hooks
 
 Opening a repository for read operations should not execute repository hooks.
+
+Content filters are a separate Git-configured process surface from hooks. M0 status reads
+neutralize configured `filter.<driver>.clean` and `filter.<driver>.process` commands before
+asking Git for working-tree state.
 
 Mutating Git operations may naturally cause hooks depending on Git behavior.
 

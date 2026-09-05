@@ -1,4 +1,5 @@
 use std::{
+    env,
     ffi::{OsStr, OsString},
     io::{self, Read},
     path::Path,
@@ -20,12 +21,16 @@ pub struct GitOutput {
 #[derive(Clone)]
 pub struct GitRunner {
     executable: OsString,
+    #[cfg(test)]
+    environment: Vec<(OsString, OsString)>,
 }
 
 impl Default for GitRunner {
     fn default() -> Self {
         Self {
             executable: OsString::from("git"),
+            #[cfg(test)]
+            environment: Vec::new(),
         }
     }
 }
@@ -35,7 +40,18 @@ impl GitRunner {
     pub fn with_executable(executable: impl Into<OsString>) -> Self {
         Self {
             executable: executable.into(),
+            environment: Vec::new(),
         }
+    }
+
+    #[cfg(test)]
+    pub fn with_environment(
+        mut self,
+        name: impl Into<OsString>,
+        value: impl Into<OsString>,
+    ) -> Self {
+        self.environment.push((name.into(), value.into()));
+        self
     }
 
     pub fn version(&self) -> Result<String, OrbitError> {
@@ -72,6 +88,10 @@ impl GitRunner {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+
+        #[cfg(test)]
+        command.envs(self.environment.iter().cloned());
+        scrub_git_environment(&mut command, self.test_environment_names());
 
         if let Some(current_dir) = current_dir {
             command.current_dir(current_dir);
@@ -119,6 +139,33 @@ impl GitRunner {
             Err(OrbitError::git_failed(operation, &output.stderr))
         }
     }
+
+    #[cfg(test)]
+    fn test_environment_names(&self) -> impl Iterator<Item = OsString> + '_ {
+        self.environment.iter().map(|(name, _)| name.clone())
+    }
+
+    #[cfg(not(test))]
+    fn test_environment_names(&self) -> impl Iterator<Item = OsString> + '_ {
+        std::iter::empty()
+    }
+}
+
+fn scrub_git_environment(
+    command: &mut Command,
+    additional_names: impl IntoIterator<Item = OsString>,
+) {
+    for name in env::vars_os().map(|(name, _)| name).chain(additional_names) {
+        if is_git_environment_name(&name) {
+            command.env_remove(name);
+        }
+    }
+}
+
+fn is_git_environment_name(name: &OsStr) -> bool {
+    name.to_string_lossy()
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("GIT_"))
 }
 
 struct BoundedRead {
@@ -176,5 +223,14 @@ mod tests {
             .expect_err("version output should exceed one byte");
 
         assert_eq!(output.code, "git_command_failed");
+    }
+
+    #[test]
+    fn identifies_git_environment_variables() {
+        assert!(is_git_environment_name(OsStr::new("GIT_DIR")));
+        assert!(is_git_environment_name(OsStr::new("git_work_tree")));
+        assert!(is_git_environment_name(OsStr::new("GIT_CONFIG_KEY_0")));
+        assert!(!is_git_environment_name(OsStr::new("PATH")));
+        assert!(!is_git_environment_name(OsStr::new("ORBIT_GIT_DIR")));
     }
 }

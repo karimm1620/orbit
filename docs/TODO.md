@@ -53,6 +53,7 @@
 - [x] Capture exit status/stdout/stderr safely.
 - [x] Add Git version detection.
 - [x] Add size/encoding handling appropriate to each parser.
+- [x] Remove inherited `GIT_*` overrides from M0 child processes.
 - [x] Prevent frontend access to the generic process runner.
 - [x] Add unit/integration tests.
 
@@ -83,6 +84,7 @@
 - [x] Parse unstaged entries.
 - [x] Parse untracked entries.
 - [x] Parse conflicts.
+- [x] Prevent status reads from executing configured content-filter programs.
 - [x] Test spaces in filenames.
 - [x] Test Unicode filenames.
 - [x] Test leading `-` filename.

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::BTreeSet, ffi::OsString, path::Path};
 
 use serde::Serialize;
 
@@ -7,6 +7,9 @@ use crate::error::OrbitError;
 use super::GitRunner;
 
 const STATUS_OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
+const CONFIG_OUTPUT_LIMIT: usize = 1024 * 1024;
+const MAX_FILTER_DRIVERS: usize = 256;
+const MAX_FILTER_DRIVER_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,24 +38,94 @@ pub struct StatusSnapshot {
 }
 
 pub fn read_status(runner: &GitRunner, root: &Path) -> Result<StatusSnapshot, OrbitError> {
-    let output = runner.run(
-        Some(root),
-        "read_status",
+    let filter_drivers = configured_filter_drivers(runner, root)?;
+    let mut args = Vec::with_capacity(10 + filter_drivers.len() * 6);
+    args.extend([OsString::from("-c"), OsString::from("core.fsmonitor=false")]);
+    for driver in filter_drivers {
+        args.extend([
+            OsString::from("-c"),
+            OsString::from(format!("filter.{driver}.clean=")),
+            OsString::from("-c"),
+            OsString::from(format!("filter.{driver}.process=")),
+            OsString::from("-c"),
+            OsString::from(format!("filter.{driver}.required=false")),
+        ]);
+    }
+    args.extend(
         [
-            "-c",
-            "core.fsmonitor=false",
             "--no-optional-locks",
             "status",
             "--porcelain=v2",
             "--branch",
             "--untracked-files=normal",
             "-z",
-        ],
-        STATUS_OUTPUT_LIMIT,
-    )?;
+        ]
+        .map(OsString::from),
+    );
+
+    let output = runner.run(Some(root), "read_status", args, STATUS_OUTPUT_LIMIT)?;
     let output = runner.require_success("read_status", output)?;
 
     parse_status(&output.stdout)
+}
+
+fn configured_filter_drivers(
+    runner: &GitRunner,
+    root: &Path,
+) -> Result<BTreeSet<String>, OrbitError> {
+    let output = runner.run(
+        Some(root),
+        "read_git_configuration",
+        [
+            "--no-optional-locks",
+            "config",
+            "--null",
+            "--name-only",
+            "--list",
+        ],
+        CONFIG_OUTPUT_LIMIT,
+    )?;
+    let output = runner.require_success("read_git_configuration", output)?;
+    parse_filter_drivers(&output.stdout)
+}
+
+fn parse_filter_drivers(output: &[u8]) -> Result<BTreeSet<String>, OrbitError> {
+    let mut drivers = BTreeSet::new();
+
+    for key in output
+        .split(|byte| *byte == 0)
+        .filter(|key| !key.is_empty())
+    {
+        let suffix_length = if key.len() > b"filter..clean".len()
+            && key[..7].eq_ignore_ascii_case(b"filter.")
+            && key[key.len() - 6..].eq_ignore_ascii_case(b".clean")
+        {
+            6
+        } else if key.len() > b"filter..process".len()
+            && key[..7].eq_ignore_ascii_case(b"filter.")
+            && key[key.len() - 8..].eq_ignore_ascii_case(b".process")
+        {
+            8
+        } else {
+            continue;
+        };
+        let driver = &key[7..key.len() - suffix_length];
+        if driver.len() > MAX_FILTER_DRIVER_BYTES {
+            return Err(OrbitError::output_too_large("read_git_configuration"));
+        }
+        let driver = std::str::from_utf8(driver).map_err(|_| {
+            OrbitError::unsupported(
+                "read_git_configuration",
+                "A configured Git filter name is not valid UTF-8.",
+            )
+        })?;
+        drivers.insert(driver.to_owned());
+        if drivers.len() > MAX_FILTER_DRIVERS {
+            return Err(OrbitError::output_too_large("read_git_configuration"));
+        }
+    }
+
+    Ok(drivers)
 }
 
 fn parse_status(output: &[u8]) -> Result<StatusSnapshot, OrbitError> {
@@ -246,5 +319,19 @@ mod tests {
         assert!(parsed.head.detached);
         assert_eq!(parsed.head.branch, None);
         assert!(parsed.working_tree.clean);
+    }
+
+    #[test]
+    fn parses_only_executable_filter_driver_configuration() {
+        let fixture = concat!(
+            "filter.first.clean\0",
+            "filter.first.required\0",
+            "FILTER.second.PROCESS\0",
+            "diff.third.command\0",
+        );
+
+        let drivers = parse_filter_drivers(fixture.as_bytes()).expect("valid filter names");
+
+        assert_eq!(drivers.into_iter().collect::<Vec<_>>(), ["first", "second"]);
     }
 }

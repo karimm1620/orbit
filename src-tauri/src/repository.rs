@@ -150,7 +150,11 @@ fn resolve_repository(runner: &GitRunner, selected: &Path) -> Result<PathBuf, Or
         REPOSITORY_PROBE_LIMIT,
     )?;
     if !probe.status.success() {
-        return Err(OrbitError::not_a_repository());
+        return Err(if has_repository_marker(&selected) {
+            OrbitError::git_failed("validate_repository", &probe.stderr)
+        } else {
+            OrbitError::not_a_repository()
+        });
     }
     let probe = std::str::from_utf8(&probe.stdout).map_err(|_| {
         OrbitError::unsupported(
@@ -175,16 +179,33 @@ fn resolve_repository(runner: &GitRunner, selected: &Path) -> Result<PathBuf, Or
         REPOSITORY_PROBE_LIMIT,
     )?;
     let root = runner.require_success("resolve_repository_root", root)?;
-    let root = std::str::from_utf8(&root.stdout).map_err(|_| {
+    let root = root.stdout.strip_suffix(b"\n").ok_or_else(|| {
+        OrbitError::unsupported(
+            "resolve_repository_root",
+            "Git returned malformed repository root data.",
+        )
+    })?;
+    #[cfg(windows)]
+    let root = root.strip_suffix(b"\r").unwrap_or(root);
+    let root = std::str::from_utf8(root).map_err(|_| {
         OrbitError::unsupported(
             "resolve_repository_root",
             "The repository root path is not valid UTF-8.",
         )
     })?;
-    let root = PathBuf::from(root.trim_end_matches(['\n', '\r']));
+    let root = PathBuf::from(root);
 
     fs::canonicalize(root).map_err(|_| {
         OrbitError::repository_unavailable("The Git working-tree root cannot be read.")
+    })
+}
+
+fn has_repository_marker(selected: &Path) -> bool {
+    selected.ancestors().any(|directory| {
+        let marker = directory.join(".git");
+        fs::metadata(&marker).is_ok_and(|metadata| {
+            metadata.is_file() || (metadata.is_dir() && marker.join("HEAD").exists())
+        })
     })
 }
 
@@ -371,6 +392,87 @@ mod tests {
     }
 
     #[test]
+    fn status_does_not_execute_configured_content_filters() {
+        let repository = TestRepository::new();
+        repository.write(".gitattributes", "tracked.txt filter=orbit-test\n");
+        repository.write("tracked.txt", "base\n");
+        repository.git_ok(["add", "--", ".gitattributes", "tracked.txt"]);
+        repository.git_ok(["commit", "-m", "Initial commit"]);
+
+        let marker = repository.root.join("filter-ran");
+        let command = format!("touch {}", marker.display());
+        repository.git_ok(["config", "filter.orbit-test.clean", command.as_str()]);
+        repository.git_ok(["config", "filter.orbit-test.process", command.as_str()]);
+        repository.git_ok(["config", "filter.orbit-test.required", "true"]);
+        repository.write("tracked.txt", "next\n");
+
+        GitRunner::default()
+            .run(
+                Some(&repository.root),
+                "test_unprotected_status",
+                [
+                    "-c",
+                    "core.fsmonitor=false",
+                    "--no-optional-locks",
+                    "status",
+                    "--porcelain=v2",
+                    "-z",
+                ],
+                1024 * 1024,
+            )
+            .expect("run unprotected status fixture");
+        assert!(marker.exists(), "fixture filter was not executed");
+        fs::remove_file(&marker).expect("remove filter marker");
+
+        let snapshot = RepositoryRegistry::default()
+            .open(repository.root.clone())
+            .expect("open repository without executing filters");
+
+        assert_eq!(snapshot.working_tree.unstaged, 1);
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn inherited_git_environment_cannot_redirect_repository_identity() {
+        let selected = TestRepository::new();
+        selected.commit_file("selected.txt", "selected\n", "Selected repository");
+        let redirected = TestRepository::new();
+        redirected.commit_file("redirected.txt", "redirected\n", "Redirected repository");
+        let runner = GitRunner::default()
+            .with_environment("GIT_DIR", redirected.root.join(".git").into_os_string())
+            .with_environment("GIT_WORK_TREE", redirected.root.clone().into_os_string());
+
+        let snapshot = RepositoryRegistry::with_runner(runner)
+            .open(selected.root.clone())
+            .expect("open selected repository");
+
+        assert_eq!(snapshot.root, selected.root.to_string_lossy());
+        assert_eq!(snapshot.recent_commits[0].subject, "Selected repository");
+    }
+
+    #[test]
+    fn preserves_a_trailing_newline_in_the_repository_root() {
+        let mut repository = TestRepository::new();
+        let renamed = repository.root.with_file_name(format!(
+            "{}\n",
+            repository
+                .root
+                .file_name()
+                .expect("test repository name")
+                .to_string_lossy()
+        ));
+        fs::rename(&repository.root, &renamed).expect("rename test repository");
+        repository.root = renamed;
+        repository.commit_file("tracked.txt", "base\n", "Initial commit");
+
+        let snapshot = RepositoryRegistry::default()
+            .open(repository.root.clone())
+            .expect("open repository with newline suffix");
+
+        assert_eq!(snapshot.root, repository.root.to_string_lossy());
+    }
+
+    #[test]
     fn returns_structured_errors_for_invalid_and_bare_directories() {
         let directory = TestRepository::new();
         fs::remove_dir_all(directory.root.join(".git")).expect("remove fixture metadata");
@@ -386,6 +488,21 @@ mod tests {
             .open(bare.root.clone())
             .expect_err("bare repository");
         assert_eq!(unsupported.code, "unsupported_repository_state");
+    }
+
+    #[test]
+    fn preserves_git_failures_for_discovered_repository_metadata() {
+        let repository = TestRepository::new();
+        fs::write(repository.root.join(".git/config"), "[invalid\n")
+            .expect("corrupt fixture config");
+
+        let error = RepositoryRegistry::default()
+            .open(repository.root.clone())
+            .expect_err("invalid repository configuration");
+
+        assert_eq!(error.code, "git_command_failed");
+        assert_eq!(error.operation, "validate_repository");
+        assert!(error.details.is_some());
     }
 
     #[test]
