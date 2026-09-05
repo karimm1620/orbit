@@ -502,15 +502,17 @@ continuation is preferred, secondary parents open lanes to its right, and conver
 deduplicated.
 
 B2a implements this as a pure `reduceTopology` TypeScript reducer. It returns semantic rows, lane
- transitions, parent edges, ref annotations, and explicit continuation stubs without pixel
- coordinates, SVG paths, DOM objects, or React lifecycle dependencies. Its continuation state keeps
- active lane IDs and expected parent OIDs stable across B1 pages; processed OIDs are bounded by the
- B1 session ceiling.
+transitions, parent edges, ref annotations, and explicit continuation stubs without pixel
+coordinates, SVG paths, DOM objects, or React lifecycle dependencies. Its continuation state keeps
+active lane IDs and expected parent OIDs stable across B1 pages; processed OIDs are bounded by the
+B1 session ceiling.
 
-Commit metadata, focus, selection, and keyboard behavior remain ordinary accessible DOM. A narrow
-per-row SVG is presentation-only and draws graph nodes and edges. No graph or virtualization
-dependency is approved initially. Profile 100, 500, and 1,000 loaded rows on a recorded Linux
-environment before deciding whether fixed-row windowing is necessary.
+B2b now consumes those rows in an accessible fixed-height commit list. Commit metadata, focus,
+selection, refs, and details remain ordinary DOM content. Each row owns a narrow `aria-hidden` SVG
+strip for topology only. The strip maps stable lane IDs to compact visual columns and uses fixed
+geometry; it never recomputes Git relationships. No graph, animation, global-state, or
+virtualization dependency is approved initially. Profile 100, 500, and 1,000 loaded rows on a
+recorded Linux environment before deciding whether fixed-row windowing is necessary.
 
 The exact command framing, cursor state, type model, lane invariants, renderer comparison, and
 security mitigations are recorded in `M1_COMMIT_GRAPH_RESEARCH.md`.

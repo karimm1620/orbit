@@ -19,7 +19,7 @@
 - [x] Record accepted architecture in canonical documentation.
 
 The accepted architecture is in `M1_COMMIT_GRAPH_RESEARCH.md` and ADR-018 through ADR-021.
-No product graph UI was implemented during this gate.
+The B2b graph workspace now consumes the bounded history service without adding mutation workflows.
 
 ---
 
@@ -70,13 +70,13 @@ No product graph UI was implemented during this gate.
 
 ## 5. Initial graph renderer
 
-- [ ] Keep commit subject, author, time, refs, selection, and keyboard behavior in semantic DOM.
-- [ ] Draw only topology nodes/edges in an `aria-hidden` per-row SVG strip.
-- [ ] Add accessible text for HEAD, ref, and merge information conveyed visually.
-- [ ] Support empty, loading, incremental-loading, detached, unborn, and error states.
-- [ ] Add commit selection and read-only commit details within M1 scope.
-- [ ] Keep fixed row geometry compatible with future windowing.
-- [ ] Do not add graph, animation, global-state, or virtualization dependencies initially.
+- [x] Keep commit subject, author, time, refs, selection, and keyboard behavior in semantic DOM.
+- [x] Draw only topology nodes/edges in an `aria-hidden` per-row SVG strip.
+- [x] Add accessible text for HEAD, ref, and merge information conveyed visually.
+- [x] Support empty, loading, incremental-loading, detached, unborn, and error states.
+- [x] Add commit selection and read-only commit details within M1 scope.
+- [x] Keep fixed row geometry compatible with future windowing.
+- [x] Do not add graph, animation, global-state, or virtualization dependencies initially.
 
 ---
 
@@ -99,7 +99,7 @@ No product graph UI was implemented during this gate.
 - [x] Preserve `core.fsmonitor=false` for status reads.
 - [x] Confirm no arbitrary frontend Git/filesystem/process capability.
 - [x] Confirm Tauri capabilities remain least-privilege.
-- [ ] Render all repository-controlled data as untrusted text.
+- [x] Render all repository-controlled data as untrusted text.
 
 ---
 
