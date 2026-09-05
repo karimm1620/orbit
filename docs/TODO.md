@@ -59,12 +59,12 @@ No product graph UI was implemented during this gate.
 
 ## 4. Topology model
 
-- [ ] Implement the pure TypeScript lane reducer independently of rendering.
-- [ ] Preserve stable monotonic lane IDs across pages.
-- [ ] Prefer first-parent continuation and deterministic secondary-parent order.
-- [ ] Deduplicate converging lanes and compact only visual columns.
-- [ ] Emit continuation stubs for parents beyond the current page.
-- [ ] Add deterministic fixtures for linear, merge, nested merge, octopus, page split, and parent-outside-window history.
+- [x] Implement the pure TypeScript lane reducer independently of rendering.
+- [x] Preserve stable monotonic lane IDs across pages.
+- [x] Prefer first-parent continuation and deterministic secondary-parent order.
+- [x] Deduplicate converging lanes and compact only visual columns.
+- [x] Emit continuation stubs for parents beyond the current page.
+- [x] Add deterministic fixtures for linear, merge, nested merge, octopus, page split, and parent-outside-window history.
 
 ---
 

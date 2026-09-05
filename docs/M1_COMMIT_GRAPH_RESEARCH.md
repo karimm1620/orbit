@@ -343,13 +343,12 @@ No dependency is selected or installed in this phase.
 ## 11. Implementation handoff
 
 M1 B1 completed the Rust history-session state, structured parsers, ref mapping, capability probe,
-purpose-specific typed IPC, and temporary real-repository integration fixtures. B2 should proceed in
-this order:
+purpose-specific typed IPC, and temporary real-repository integration fixtures. B2a completed the
+pure deterministic topology reducer and pagination fixtures. B2b should proceed in this order:
 
 1. consume `get_commit_history_page` from the M1 graph state layer
-2. implement and unit-test the pure lane reducer using the documented fixtures
-3. implement the accessible DOM-row + SVG-strip renderer and incremental loading states
-4. profile the defined row counts before deciding whether windowing is needed
+2. implement the accessible DOM-row + SVG-strip renderer and incremental loading states
+3. profile the defined row counts before deciding whether windowing is needed
 
 Do not add commit mutation, branch mutation, diff rendering, provider APIs, persistence, file
 watching, or final visual polish as part of that slice.

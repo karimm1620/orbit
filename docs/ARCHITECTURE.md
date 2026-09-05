@@ -501,6 +501,12 @@ monotonic across appended pages; visual columns may compact when lanes close. Fi
 continuation is preferred, secondary parents open lanes to its right, and converging lanes are
 deduplicated.
 
+B2a implements this as a pure `reduceTopology` TypeScript reducer. It returns semantic rows, lane
+ transitions, parent edges, ref annotations, and explicit continuation stubs without pixel
+ coordinates, SVG paths, DOM objects, or React lifecycle dependencies. Its continuation state keeps
+ active lane IDs and expected parent OIDs stable across B1 pages; processed OIDs are bounded by the
+ B1 session ceiling.
+
 Commit metadata, focus, selection, and keyboard behavior remain ordinary accessible DOM. A narrow
 per-row SVG is presentation-only and draws graph nodes and edges. No graph or virtualization
 dependency is approved initially. Profile 100, 500, and 1,000 loaded rows on a recorded Linux
