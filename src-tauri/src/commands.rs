@@ -5,6 +5,7 @@ use tauri_plugin_dialog::DialogExt;
 
 use crate::{
     error::OrbitError,
+    history_sessions::CommitHistoryPage,
     repository::{RepositoryRegistry, RepositorySnapshot},
 };
 
@@ -55,4 +56,25 @@ pub async fn get_repository_snapshot(
                 "The repository reader stopped unexpectedly.",
             )
         })?
+}
+
+#[tauri::command]
+pub async fn get_commit_history_page(
+    repository_id: String,
+    cursor: Option<String>,
+    page_size: Option<i64>,
+    repositories: State<'_, Arc<RepositoryRegistry>>,
+) -> Result<CommitHistoryPage, OrbitError> {
+    let repositories = Arc::clone(&repositories);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        repositories.commit_history_page(&repository_id, cursor.as_deref(), page_size)
+    })
+    .await
+    .map_err(|_| {
+        OrbitError::internal(
+            "read_commit_history",
+            "The commit-history reader stopped unexpectedly.",
+        )
+    })?
 }

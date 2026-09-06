@@ -4,12 +4,14 @@ use std::{
     io::{self, Read},
     path::Path,
     process::{Command, ExitStatus, Stdio},
+    sync::{Arc, OnceLock},
     thread,
 };
 
 use crate::error::OrbitError;
 
 const STDERR_LIMIT: usize = 64 * 1024;
+const NO_LAZY_FETCH_ENVIRONMENT: &str = "GIT_NO_LAZY_FETCH";
 
 #[derive(Debug)]
 pub struct GitOutput {
@@ -21,16 +23,22 @@ pub struct GitOutput {
 #[derive(Clone)]
 pub struct GitRunner {
     executable: OsString,
+    no_lazy_fetch_capability: Arc<OnceLock<Result<(), OrbitError>>>,
     #[cfg(test)]
     environment: Vec<(OsString, OsString)>,
+    #[cfg(test)]
+    restore_no_lazy_fetch_environment: bool,
 }
 
 impl Default for GitRunner {
     fn default() -> Self {
         Self {
             executable: OsString::from("git"),
+            no_lazy_fetch_capability: Arc::new(OnceLock::new()),
             #[cfg(test)]
             environment: Vec::new(),
+            #[cfg(test)]
+            restore_no_lazy_fetch_environment: true,
         }
     }
 }
@@ -40,7 +48,9 @@ impl GitRunner {
     pub fn with_executable(executable: impl Into<OsString>) -> Self {
         Self {
             executable: executable.into(),
+            no_lazy_fetch_capability: Arc::new(OnceLock::new()),
             environment: Vec::new(),
+            restore_no_lazy_fetch_environment: true,
         }
     }
 
@@ -51,6 +61,12 @@ impl GitRunner {
         value: impl Into<OsString>,
     ) -> Self {
         self.environment.push((name.into(), value.into()));
+        self
+    }
+
+    #[cfg(test)]
+    pub fn without_no_lazy_fetch_environment(mut self) -> Self {
+        self.restore_no_lazy_fetch_environment = false;
         self
     }
 
@@ -69,6 +85,25 @@ impl GitRunner {
         }
 
         Ok(version.to_owned())
+    }
+
+    pub fn require_no_lazy_fetch(&self) -> Result<(), OrbitError> {
+        self.no_lazy_fetch_capability
+            .get_or_init(|| {
+                let output = self.run(
+                    None,
+                    "detect_git_capabilities",
+                    ["--no-pager", "--no-lazy-fetch", "--version"],
+                    4 * 1024,
+                )?;
+
+                if output.status.success() {
+                    Ok(())
+                } else {
+                    Err(OrbitError::git_capability_unavailable())
+                }
+            })
+            .clone()
     }
 
     pub fn run<I, S>(
@@ -92,6 +127,12 @@ impl GitRunner {
         #[cfg(test)]
         command.envs(self.environment.iter().cloned());
         scrub_git_environment(&mut command, self.test_environment_names());
+        #[cfg(not(test))]
+        command.env(NO_LAZY_FETCH_ENVIRONMENT, "1");
+        #[cfg(test)]
+        if self.restore_no_lazy_fetch_environment {
+            command.env(NO_LAZY_FETCH_ENVIRONMENT, "1");
+        }
 
         if let Some(current_dir) = current_dir {
             command.current_dir(current_dir);
@@ -232,5 +273,48 @@ mod tests {
         assert!(is_git_environment_name(OsStr::new("GIT_CONFIG_KEY_0")));
         assert!(!is_git_environment_name(OsStr::new("PATH")));
         assert!(!is_git_environment_name(OsStr::new("ORBIT_GIT_DIR")));
+    }
+
+    #[test]
+    fn restores_the_internal_no_lazy_fetch_policy_after_scrubbing() {
+        let runner = GitRunner::with_executable("env")
+            .with_environment("GIT_DIR", "/tmp/untrusted")
+            .with_environment(NO_LAZY_FETCH_ENVIRONMENT, "0");
+
+        let output = runner
+            .run(
+                None,
+                "inspect_environment",
+                std::iter::empty::<&str>(),
+                64 * 1024,
+            )
+            .expect("environment process should run");
+        let output = runner
+            .require_success("inspect_environment", output)
+            .expect("environment process should succeed");
+        let environment = String::from_utf8(output.stdout).expect("environment should be UTF-8");
+
+        assert!(environment
+            .lines()
+            .any(|line| line == "GIT_NO_LAZY_FETCH=1"));
+        assert!(!environment.lines().any(|line| line.starts_with("GIT_DIR=")));
+    }
+
+    #[test]
+    fn detects_the_secure_history_capability() {
+        GitRunner::default()
+            .require_no_lazy_fetch()
+            .expect("development Git should support --no-lazy-fetch");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn maps_a_missing_secure_history_capability() {
+        let error = GitRunner::with_executable("false")
+            .require_no_lazy_fetch()
+            .expect_err("false cannot support Git global options");
+
+        assert_eq!(error.code, "git_capability_unavailable");
+        assert_eq!(error.operation, "detect_git_capabilities");
     }
 }

@@ -337,12 +337,143 @@ If a simpler implementation conflicts with `SECURITY.md`, choose the safer bound
 
 ---
 
+## ADR-018 — Graph history uses native Git with an opaque ordered-plan cursor
+
+**Status:** Accepted
+
+### Decision
+
+Acquire one bounded full-OID order with `git log --topo-order` at session start, capped at the
+1,000-commit session ceiling plus one truncation sentinel. Acquire each page's seven-field,
+NUL-framed metadata for the next Rust-owned OID slice with `git log --no-walk=unsorted`. Acquire
+local branches, remote-tracking branches, and tags once per session with a separate bounded
+`git for-each-ref` query.
+
+Pagination is a Rust-owned session containing the bounded ordered OID plan and its next index.
+React receives only an opaque cursor and cannot supply revision expressions.
+
+### Why
+
+- topological order supplies the parent-after-child invariant needed by the lane reducer
+- `for-each-ref` preserves ref kinds, symbolic refs, and annotated-tag peeling without parsing
+  decoration text
+- a single bounded topological walk preserves Git's traversal-queue decisions across every page;
+  reconstructing a walk from incomparable frontier tips was proven page-boundary-sensitive
+- per-page metadata reads avoid repeatedly traversing an ever-growing skipped prefix
+- a session snapshot prevents ref changes from silently altering the meaning of later pages
+
+### Consequences
+
+- initial pages default to 100 commits, requests above 200 are rejected, starting tips are capped
+  at 512, and sessions stop at 1,000 loaded commits until the renderer/virtualization gate is
+  measured; the ordered plan is bounded to 1,001 OIDs and reports the sentinel as an explicit limit
+- explicit refresh creates a new history session
+- the M1 history capability requires Git's `--no-lazy-fetch` support; unsupported Git versions
+  retain the M0 snapshot but receive a structured graph error
+- exact command and model details live in `M1_COMMIT_GRAPH_RESEARCH.md`
+
+---
+
+## ADR-019 — Git topology is a pure frontend model rendered with DOM and SVG
+
+**Status:** Accepted
+
+### Decision
+
+Rust returns semantic commits, parent OIDs, refs, and cursor state. A deterministic pure TypeScript
+reducer assigns stable lane identities and per-row edge geometry while carrying continuation state
+between pages.
+
+Render each commit as an accessible fixed-height DOM row. Use a narrow, presentation-only SVG in
+that row for graph nodes and edges.
+
+### Why
+
+- renderer coordinates are not Git domain data
+- normal DOM retains text selection, focus, keyboard behavior, semantics, and straightforward tests
+- SVG handles merge curves and high-DPI scaling without Canvas redraw, hit-testing, or duplicate
+  accessibility infrastructure
+- per-row geometry supports incremental append and future fixed-row windowing
+
+### Consequences
+
+- visual topology must not be the only accessible source of HEAD, refs, or merge information
+- lane IDs remain stable across pages even when visual columns compact
+- Canvas remains an evidence-driven fallback, not an initial dependency
+
+---
+
+## ADR-020 — Defer commit-list virtualization until profiling
+
+**Status:** Accepted
+
+### Decision
+
+Do not add a virtualization dependency for the initial 100-row graph page. Profile 100, 500, and
+1,000 loaded rows on a recorded Linux environment before M1 acceptance.
+
+Require fixed-row windowing if any of three release-mode runs at 1,000 rows on the recorded primary
+Linux hardware shows a 95th-percentile scroll frame interval above 16.7 ms or a 95th-percentile
+selection-to-next-paint latency above 100 ms. A profiler-confirmed DOM/layout interaction stall is
+also sufficient evidence. Review a library against a small internal fixed-row window only after
+that evidence exists.
+
+### Consequences
+
+- no large-repository performance claim is made by this decision
+- fixed row height and renderer/model separation are required now so windowing can be added later
+- unbounded DOM accumulation is not approved
+
+---
+
+## ADR-021 — History sessions use bounded process-local rotating cursors
+
+**Status:** Accepted
+
+### Decision
+
+Expose `get_commit_history_page(repository_id, cursor, page_size)` as the sole B1 history IPC.
+Omitting the cursor starts a session and snapshots semantic HEAD, typed refs, and their commit tips.
+Each successful continuation consumes its cursor and issues a new opaque cursor.
+Before page I/O, the registry marks the cursor in flight. Concurrent reuse fails. A capability or
+Git page-read failure restores the same cursor; successful page completion atomically removes it
+and, when more buffered history remains, inserts the rotated cursor.
+
+Keep at most eight active sessions, expire sessions after 15 minutes idle, and evict the least
+recently accessed session when inserting beyond the active bound. Page size defaults to 100 and
+must be between 1 and 200; invalid values are rejected with a structured error. A session stops at
+1,000 emitted commits and reports whether unresolved history remains.
+
+Bind every session to its authorized repository ID and canonical root. A process restart,
+unknown/expired/reused cursor, repository mismatch, unavailable repository, or changed root
+identity invalidates continuation. Later HEAD/ref movement does not alter the captured traversal;
+explicit refresh starts a new snapshot. Typed refs are emitted only on the first page.
+
+### Why
+
+- rotating single-use cursors make invalid state transitions deterministic without exposing Git
+  revision expressions
+- bounded process-local state needs no database and cannot grow without a fixed ceiling
+- retaining the bounded ordered OID plan prevents unrelated repository changes from silently
+  splicing different topology into later pages
+- explicit available/in-flight state preserves successful single-use semantics without consuming
+  a cursor on a failed page
+- repository/root binding preserves the M0 authorization boundary
+
+### Consequences
+
+- cursors are opaque handles, not authorization secrets; the repository ID/root binding is always
+  checked as well
+- session state intentionally does not survive an application restart
+- eviction or expiry is recoverable by starting a fresh history request
+- in-flight sessions are not selected for active-session eviction
+
+---
+
 ## Deferred decisions
 
 The following are intentionally not locked yet:
 
-- graph renderer: DOM/SVG/canvas/custom
-- virtualization library
 - file-watching library
 - syntax highlighter
 - state/query library
