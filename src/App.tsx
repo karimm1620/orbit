@@ -43,20 +43,28 @@ function App() {
   const requestSequence = useRef(0);
 
   async function openRepository() {
-    const sequence = ++requestSequence.current;
+    const pickerSequence = requestSequence.current;
+    let replacementSequence: number | null = null;
     setRequestState("opening");
-    setError(null);
-    setHistory((current) => current.status === "loading-more" ? { ...current, status: "idle" } : current);
     try {
       const selected = await selectRepository();
-      if (sequence !== requestSequence.current || !selected) return;
+      if (!selected) return;
+
+      const sequence = ++requestSequence.current;
+      replacementSequence = sequence;
+      setError(null);
       setRepository(selected);
       setSelectedOid(null);
       await loadInitialHistory(selected, sequence);
     } catch (requestError) {
-      if (sequence === requestSequence.current) setError(toOrbitError(requestError));
+      if (pickerSequence === requestSequence.current) setError(toOrbitError(requestError));
     } finally {
-      if (sequence === requestSequence.current) setRequestState("idle");
+      if (
+        (replacementSequence !== null && replacementSequence === requestSequence.current)
+        || (replacementSequence === null && pickerSequence === requestSequence.current)
+      ) {
+        setRequestState("idle");
+      }
     }
   }
 
