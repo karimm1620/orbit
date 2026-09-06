@@ -337,33 +337,36 @@ If a simpler implementation conflicts with `SECURITY.md`, choose the safer bound
 
 ---
 
-## ADR-018 — Graph history uses native Git with an opaque frontier cursor
+## ADR-018 — Graph history uses native Git with an opaque ordered-plan cursor
 
 **Status:** Accepted
 
 ### Decision
 
-Acquire graph commits with a bounded, NUL-framed `git log --topo-order` query. Acquire local
-branches, remote-tracking branches, and tags once per history session with a separate bounded
+Acquire one bounded full-OID order with `git log --topo-order` at session start, capped at the
+1,000-commit session ceiling plus one truncation sentinel. Acquire each page's seven-field,
+NUL-framed metadata for the next Rust-owned OID slice with `git log --no-walk=unsorted`. Acquire
+local branches, remote-tracking branches, and tags once per session with a separate bounded
 `git for-each-ref` query.
 
-Pagination is a Rust-owned session containing unresolved full-OID frontier tips and already-emitted
-OIDs. React receives only an opaque cursor and cannot supply revision expressions.
+Pagination is a Rust-owned session containing the bounded ordered OID plan and its next index.
+React receives only an opaque cursor and cannot supply revision expressions.
 
 ### Why
 
 - topological order supplies the parent-after-child invariant needed by the lane reducer
 - `for-each-ref` preserves ref kinds, symbolic refs, and annotated-tag peeling without parsing
   decoration text
-- frontier paging advances from unfinished history lines instead of repeatedly traversing an
-  ever-growing skipped prefix
+- a single bounded topological walk preserves Git's traversal-queue decisions across every page;
+  reconstructing a walk from incomparable frontier tips was proven page-boundary-sensitive
+- per-page metadata reads avoid repeatedly traversing an ever-growing skipped prefix
 - a session snapshot prevents ref changes from silently altering the meaning of later pages
 
 ### Consequences
 
-- initial pages default to 100 commits, requests above 200 are rejected, active frontier tips are
-  capped at 512, and sessions stop at 1,000 loaded commits until the renderer/virtualization gate
-  is measured; bound failures are explicit rather than silently truncating graph lines
+- initial pages default to 100 commits, requests above 200 are rejected, starting tips are capped
+  at 512, and sessions stop at 1,000 loaded commits until the renderer/virtualization gate is
+  measured; the ordered plan is bounded to 1,001 OIDs and reports the sentinel as an explicit limit
 - explicit refresh creates a new history session
 - the M1 history capability requires Git's `--no-lazy-fetch` support; unsupported Git versions
   retain the M0 snapshot but receive a structured graph error
@@ -432,6 +435,9 @@ that evidence exists.
 Expose `get_commit_history_page(repository_id, cursor, page_size)` as the sole B1 history IPC.
 Omitting the cursor starts a session and snapshots semantic HEAD, typed refs, and their commit tips.
 Each successful continuation consumes its cursor and issues a new opaque cursor.
+Before page I/O, the registry marks the cursor in flight. Concurrent reuse fails. A capability or
+Git page-read failure restores the same cursor; successful page completion atomically removes it
+and, when more buffered history remains, inserts the rotated cursor.
 
 Keep at most eight active sessions, expire sessions after 15 minutes idle, and evict the least
 recently accessed session when inserting beyond the active bound. Page size defaults to 100 and
@@ -448,8 +454,10 @@ explicit refresh starts a new snapshot. Typed refs are emitted only on the first
 - rotating single-use cursors make invalid state transitions deterministic without exposing Git
   revision expressions
 - bounded process-local state needs no database and cannot grow without a fixed ceiling
-- retaining the starting frontier prevents unrelated repository changes from silently splicing
-  different topology into later pages
+- retaining the bounded ordered OID plan prevents unrelated repository changes from silently
+  splicing different topology into later pages
+- explicit available/in-flight state preserves successful single-use semantics without consuming
+  a cursor on a failed page
 - repository/root binding preserves the M0 authorization boundary
 
 ### Consequences
@@ -458,6 +466,7 @@ explicit refresh starts a new snapshot. Typed refs are emitted only on the first
   checked as well
 - session state intentionally does not survive an application restart
 - eviction or expiry is recoverable by starting a fresh history request
+- in-flight sessions are not selected for active-session eviction
 
 ---
 

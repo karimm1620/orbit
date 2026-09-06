@@ -282,9 +282,10 @@ mod tests {
     };
 
     use crate::git::{
-        history_starting_tips, read_graph_commits, read_object_format, CommitHistoryHead,
-        CommitRefKind,
+        history_starting_tips, read_graph_commit_page, read_graph_order, read_object_format,
+        CommitHistoryHead, CommitRefKind,
     };
+    use crate::history_sessions::MAX_HISTORY_SESSION_COMMITS;
 
     use super::*;
 
@@ -321,6 +322,26 @@ mod tests {
             self.write(path, contents);
             self.git_ok(["add", "--", path]);
             self.git_ok(["commit", "-m", message]);
+        }
+
+        fn commit_object(&self, parents: &[&str], timestamp: i64, subject: &str) -> String {
+            let tree = self.git_output(["mktree"]);
+            let parent_headers = parents
+                .iter()
+                .map(|parent| format!("parent {parent}\n"))
+                .collect::<String>();
+            let raw = format!(
+                "tree {tree}\n{parent_headers}\
+                 author Orbit Tests <orbit@example.test> {timestamp} +0000\n\
+                 committer Orbit Tests <orbit@example.test> {timestamp} +0000\n\
+                 \n{subject}\n"
+            );
+            let fixture = format!("raw-commit-{timestamp}");
+            self.write(&fixture, &raw);
+            let oid =
+                self.git_output(["hash-object", "-t", "commit", "-w", "--", fixture.as_str()]);
+            fs::remove_file(self.root.join(fixture)).expect("remove raw commit fixture");
+            oid
         }
 
         fn git_ok<const N: usize>(&self, args: [&str; N]) {
@@ -776,11 +797,10 @@ mod tests {
         assert!(marker.exists(), "fixture promisor remote was not executed");
         fs::remove_file(&marker).expect("remove lazy-fetch marker");
 
-        let error = read_graph_commits(
+        let error = read_graph_commit_page(
             &GitRunner::default(),
             &repository.root,
             &[missing_oid],
-            1,
             crate::git::ObjectFormat::Sha1,
         )
         .expect_err("missing promised object should fail without fetching");
@@ -863,6 +883,69 @@ mod tests {
             .expect_err("missing executable");
 
         assert_eq!(error.code, "git_not_found");
+    }
+
+    #[test]
+    fn paginated_history_preserves_one_shot_topo_order_across_sensitive_boundaries() {
+        let repository = TestRepository::new();
+        let root = repository.commit_object(&[], 1_700_002_364, "root");
+        let main_line = repository.commit_object(&[root.as_str()], 1_700_006_392, "main-line");
+        let merge =
+            repository.commit_object(&[main_line.as_str(), root.as_str()], 1_700_000_705, "merge");
+        let independent = repository.commit_object(&[], 1_700_003_885, "independent");
+        let side = repository.commit_object(
+            &[merge.as_str(), independent.as_str()],
+            1_700_009_333,
+            "side",
+        );
+        let head = repository.commit_object(&[root.as_str()], 1_700_004_553, "head");
+        repository.git_ok(["update-ref", "refs/heads/main", head.as_str()]);
+        repository.git_ok(["update-ref", "refs/heads/side", side.as_str()]);
+
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open ordering fixture");
+        let object_format = read_object_format(&registry.runner, &repository.root)
+            .expect("read fixture object format");
+        let expected = read_graph_order(
+            &registry.runner,
+            &repository.root,
+            &[head.clone(), side.clone()],
+            MAX_HISTORY_SESSION_COMMITS + 1,
+            object_format,
+        )
+        .expect("one-shot sensitive topological order");
+        assert_eq!(
+            expected,
+            vec![side, independent, merge, main_line, head, root],
+            "fixture must exercise Git's page-boundary-sensitive ordering"
+        );
+
+        for page_size in 1..=5 {
+            let first = registry
+                .commit_history_page(&opened.repository_id, None, Some(page_size))
+                .expect("first sensitive-order page");
+            let mut actual = first
+                .commits
+                .into_iter()
+                .map(|commit| commit.oid)
+                .collect::<Vec<_>>();
+            let mut cursor = first.next_cursor;
+            while let Some(current) = cursor {
+                let page = registry
+                    .commit_history_page(
+                        &opened.repository_id,
+                        Some(current.as_str()),
+                        Some(page_size),
+                    )
+                    .expect("continue sensitive-order history");
+                actual.extend(page.commits.into_iter().map(|commit| commit.oid));
+                cursor = page.next_cursor;
+            }
+
+            assert_eq!(actual, expected, "page size {page_size}");
+        }
     }
 
     #[test]
@@ -959,14 +1042,21 @@ mod tests {
         let object_format = read_object_format(&registry.runner, &repository.root)
             .expect("read fixture object format");
         let tips = history_starting_tips(&first.head, &first.refs);
-        let expected_commits = read_graph_commits(
+        let expected_order = read_graph_order(
             &registry.runner,
             &repository.root,
             &tips,
             200,
             object_format,
         )
-        .expect("one-shot topological history");
+        .expect("one-shot topological order");
+        let expected_commits = read_graph_commit_page(
+            &registry.runner,
+            &repository.root,
+            &expected_order,
+            object_format,
+        )
+        .expect("one-shot commit metadata");
         assert!(
             expected_commits
                 .iter()
@@ -1086,6 +1176,49 @@ mod tests {
             )
             .expect_err("expired cursor");
         assert_eq!(expired.code, "history_session_unavailable");
+    }
+
+    #[test]
+    fn failed_page_read_leaves_the_cursor_retryable() {
+        let repository = TestRepository::new();
+        for index in 0..3 {
+            repository.commit_file(
+                &format!("retry-{index}.txt"),
+                &format!("{index}\n"),
+                &format!("Retry {index}"),
+            );
+        }
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open retry fixture");
+        let first = registry
+            .commit_history_page(&opened.repository_id, None, Some(1))
+            .expect("start retryable history");
+        let cursor = first.next_cursor.expect("continuation cursor");
+        let next_oid = repository.oid("HEAD^");
+        let object_path = repository
+            .root
+            .join(".git/objects")
+            .join(&next_oid[..2])
+            .join(&next_oid[2..]);
+        let object = fs::read(&object_path).expect("read loose commit object");
+        fs::remove_file(&object_path).expect("temporarily remove commit object");
+
+        let failed = registry
+            .commit_history_page(&opened.repository_id, Some(cursor.as_str()), Some(1))
+            .expect_err("missing commit should fail the page read");
+        assert_eq!(failed.code, "git_command_failed");
+
+        fs::write(&object_path, object).expect("restore commit object");
+        let retried = registry
+            .commit_history_page(&opened.repository_id, Some(cursor.as_str()), Some(1))
+            .expect("same cursor should remain retryable");
+        assert_eq!(retried.commits[0].oid, next_oid);
+        let reused = registry
+            .commit_history_page(&opened.repository_id, Some(cursor.as_str()), Some(1))
+            .expect_err("successful retry consumes old cursor");
+        assert_eq!(reused.code, "history_session_unavailable");
     }
 
     #[test]

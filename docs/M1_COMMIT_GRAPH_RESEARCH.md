@@ -12,7 +12,7 @@ M1 will use:
 
 - native `git log --topo-order` for commit relationships and metadata
 - a separate bounded `git for-each-ref` query for typed refs and annotated-tag peeling
-- a Rust-owned opaque history session whose cursor contains a frontier of unresolved commit OIDs
+- a Rust-owned opaque history session containing one bounded topological OID plan
 - semantic commit/ref pages over purpose-specific typed IPC
 - a deterministic pure TypeScript lane reducer that carries continuation state between pages
 - normal DOM rows for text and interaction, with a presentation-only SVG topology strip
@@ -22,7 +22,8 @@ M1 will use:
 
 ### Command contract
 
-The M1 history service will build a direct, separate-argument invocation equivalent to:
+The M1 history service builds two direct, separate-argument invocations. Session initialization
+captures one bounded topological order:
 
 ```text
 git --no-pager --no-lazy-fetch --no-optional-locks \
@@ -30,9 +31,19 @@ git --no-pager --no-lazy-fetch --no-optional-locks \
   -c log.showSignature=false \
   log --topo-order --no-decorate --no-notes --no-patch \
   --no-ext-diff --no-textconv --encoding=UTF-8 \
-  --max-count=<rust-validated-limit> \
+  --max-count=1001 --format=%H -z <rust-owned-starting-tip>... --
+```
+
+Each response page then reads metadata only for the next Rust-owned slice of at most 200 OIDs:
+
+```text
+git --no-pager --no-lazy-fetch --no-optional-locks \
+  -c core.abbrev=12 \
+  -c log.showSignature=false \
+  log --no-walk=unsorted --no-decorate --no-notes --no-patch \
+  --no-ext-diff --no-textconv --encoding=UTF-8 \
   --format=%H%x00%h%x00%P%x00%an%x00%at%x00%ct%x00%s \
-  -z <rust-owned-frontier-oid>... --
+  -z <rust-owned-page-oid>... --
 ```
 
 This is an argument vector, not a shell command. `GitRunner` remains the only production module
@@ -48,9 +59,10 @@ The seven fixed fields are:
 6. commit timestamp as epoch seconds
 7. subject
 
-Records and variable text fields are NUL-framed. The parser must validate field count, UTF-8,
-object-ID syntax and algorithm length, parent IDs, numeric timestamps, page count, and the existing
-bounded stdout/stderr limits. Full OIDs are authoritative; abbreviated OIDs are display-only.
+The order plan and metadata records are NUL-framed. The parsers validate count, UTF-8, object-ID
+syntax and algorithm length, parent IDs, numeric timestamps, page count, exact correspondence to
+the requested OID slice, and the existing bounded stdout/stderr limits. Full OIDs are authoritative;
+abbreviated OIDs are display-only.
 
 `%an` is deliberate. `%aN` applies mailmap rules and can consult a configured external
 `mailmap.file`, which is not required to render history. The commit timestamp is the primary
@@ -118,43 +130,47 @@ That is an obvious route to quadratic cumulative work as the user loads older hi
 range based only on the last displayed OID also loses independent lanes that were active at the
 page boundary.
 
-### Frontier cursor
+### Bounded topological plan
 
 Rust owns a process-local history session bound to the opaque repository ID. Its opaque frontend
 cursor addresses state containing:
 
 - the ref-tip snapshot used to start traversal
-- unresolved frontier OIDs
-- the set of OIDs already emitted by this session
+- the ordered OIDs from one continuous bounded `--topo-order` traversal
+- the next unread index and whether a 1,001st truncation-sentinel commit exists
 - page-size policy and session identity
 
-For each page:
+Reconstructing `git log --topo-order` independently from unresolved frontier tips is not sufficient:
+real-Git regression coverage proved that Git's traversal queue can order mutually incomparable tips
+differently after a page boundary. Orbit therefore captures at most 1,001 OIDs once at session
+start. The first 1,000 form the immutable session plan and the final OID, when present, is only a
+sentinel indicating that the session ceiling truncates reachable history. Metadata remains
+incremental and bounded to the requested page slice. This preserves exact equality with the one
+continuous bounded topological walk, avoids repeated skip/count traversal, and keeps session state
+bounded.
 
-1. run the history command from every unresolved frontier tip
-2. discard any already-emitted OID defensively
-3. return at most the Rust-validated page size
-4. retain input frontier tips that were not emitted
-5. add parents of emitted commits that have not been emitted
-6. deduplicate the next frontier by full OID while preserving deterministic order
+The frontend cannot provide arbitrary revision expressions: it sends only `repositoryId`, an opaque
+`cursor`, and an optional requested limit that Rust validates. B1 defaults to 100 commits per page,
+accepts 1 through 200 per request, caps starting tips at 512, and stops at 1,000 loaded commits per
+session. Exceeding a bound returns a structured request, unsupported, or too-large state. The
+registry keeps at most eight process-local sessions, expires them after 15 minutes idle, evicts the
+oldest available session at the active bound, and does not evict an in-flight continuation.
 
-This state is necessary because a bounded page may end while multiple independent histories are
-still active. The frontend cannot provide arbitrary revision expressions: it sends only
-`repositoryId`, an opaque `cursor`, and an optional requested limit that Rust validates. B1 defaults
-to 100 commits per page, accepts 1 through 200 per request, caps the frontier at 512 active tips,
-and stops at 1,000 loaded commits per session. Exceeding a bound returns a structured request,
-unsupported, or too-large state; it never silently drops history lines. The implemented registry
-keeps at most eight process-local sessions, expires them after 15 minutes idle, evicts the oldest
-session at the active bound, and rotates a single-use cursor after each successful page. The
-1,000-commit ceiling is revisited only after the virtualization/profile gate.
+Continuation is transactional. The old cursor moves from available to in-flight without holding the
+registry mutex across Git I/O. Concurrent reuse fails. Capability or Git metadata-read failure
+restores the old cursor, while successful page production atomically consumes it and installs the
+rotated cursor when more planned history remains. The 1,000-commit ceiling is revisited only after
+the virtualization/profile gate.
 
 An explicit refresh starts a new session and new ref snapshot. It does not splice changed refs into
 an existing traversal. This gives each paging session a coherent view even if Git changes between
 requests. Missing objects or removed repositories produce structured errors and allow a restart.
 
-The frontier experiment used a real ten-commit repository with two merges, local and remote refs,
-lightweight and annotated tags, detached HEAD, and a Unicode ref. Four pages of three commits
-produced the same OID set and order as one bounded topological walk, without duplicates. This is a
-correctness experiment, not a large-repository performance claim.
+The original frontier experiment used a real ten-commit repository but did not expose the traversal
+queue loss. Review regression coverage adds a six-commit repository with two independent tips, two
+merges, deliberately non-monotonic timestamps, and page sizes one through five. Frontier
+reconstruction differed at sizes one and two; the bounded ordered plan matches the exact full-OID
+one-shot sequence at every boundary. This is a correctness result, not a performance claim.
 
 ## 5. Typed graph model
 
@@ -333,7 +349,7 @@ and requires the explicit Git 2.45+ global option for its graph command.
 No dependency is selected or installed in this phase.
 
 - Generic DAG layout libraries model arbitrary graphs and do not naturally preserve Git's
-  first-parent/topological conventions or incremental frontier state.
+  first-parent/topological conventions or incremental session state.
 - SVG and DOM are already available in the WebView.
 - The lane reducer is small, deterministic, Git-specific, and independently testable.
 - React state is sufficient for a single repository history session during M1.

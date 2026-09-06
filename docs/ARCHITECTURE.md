@@ -470,7 +470,7 @@ M1 locks the following split:
 ```text
 native Git log + for-each-ref
         ↓ bounded NUL-framed parsers
-Rust CommitHistoryPage + opaque frontier cursor
+Rust CommitHistoryPage + opaque ordered-plan cursor
         ↓ purpose-specific typed IPC
 pure frontend lane reducer + carried continuation state
         ↓
@@ -482,19 +482,24 @@ branches, remote-tracking branches, tags, and HEAD. Ref metadata comes from a se
 `for-each-ref` query so annotated tags, symbolic refs, and ref kinds remain typed rather than being
 parsed from decoration text.
 
-Pagination advances an opaque Rust-owned frontier of unresolved full OIDs. It does not use an
-ever-growing `--skip` value and never accepts frontend revision expressions. The implemented policy
-defaults to 100 commits per page, accepts 1 through 200 per request, caps the active frontier at 512
-tips, and stops a session at 1,000 loaded commits with an explicit limit flag. Invalid request sizes
-and bound failures are structured errors, never silent truncation.
+At session start, one bounded `git log --topo-order` walk records at most 1,001 full OIDs: the 1,000
+commits the session may emit plus one truncation sentinel. Page reads request metadata only for the
+next Rust-owned OID slice with `git log --no-walk=unsorted`. This preserves the exact order of one
+continuous topological walk without an ever-growing `--skip` value or reconstructing Git's lost
+traversal queue from frontier tips. The frontend never supplies revision expressions. The policy
+defaults to 100 commits per page, accepts 1 through 200 per request, caps starting tips at 512, and
+stops at 1,000 loaded commits with an explicit limit flag. Invalid request sizes and bound failures
+are structured errors, never silent truncation.
 
 Sessions are process-local, bound to the opaque repository ID and its revalidated canonical root,
-limited to eight active entries, and expired after 15 minutes idle. Each continuation consumes its
-cursor and returns a rotated cursor. The oldest session is evicted when the active-session bound is
-reached. A process restart, unknown/reused cursor, repository mismatch, repository disappearance,
-or changed root identity requires a new session. External HEAD/ref movement does not change an
-existing session: its starting HEAD and commit-bearing ref tips remain the traversal snapshot, and
-typed refs are returned only on its first page. Explicit refresh starts a new snapshot.
+limited to eight active entries, and expired after 15 minutes idle. A continuation atomically marks
+its cursor in flight, rejects concurrent reuse, and rotates it only after the next page succeeds.
+Capability or Git page-read failures restore the old cursor for retry. The oldest available session
+is evicted when the active-session bound is reached; in-flight sessions are not evicted. A process
+restart, unknown/reused cursor, repository mismatch, repository disappearance, or changed root
+identity requires a new session. External HEAD/ref movement does not change an existing session:
+its starting HEAD, refs, and ordered OID plan remain the snapshot, and typed refs are returned only
+on its first page. Explicit refresh starts a new snapshot.
 
 The frontend derives graph lanes from semantic parent relationships. Lane identity is stable and
 monotonic across appended pages; visual columns may compact when lanes close. First-parent
@@ -510,9 +515,11 @@ B1 session ceiling.
 B2b now consumes those rows in an accessible fixed-height commit list. Commit metadata, focus,
 selection, refs, and details remain ordinary DOM content. Each row owns a narrow `aria-hidden` SVG
 strip for topology only. The strip maps stable lane IDs to compact visual columns and uses fixed
-geometry; it never recomputes Git relationships. No graph, animation, global-state, or
-virtualization dependency is approved initially. Profile 100, 500, and 1,000 loaded rows on a
-recorded Linux environment before deciding whether fixed-row windowing is necessary.
+geometry; it never recomputes Git relationships. Active continuation stubs pin unresolved visual
+lanes through the last loaded row until a later page reconnects them. No graph, animation,
+global-state, or virtualization dependency is approved initially. Profile 100, 500, and 1,000
+loaded rows on a recorded Linux environment before deciding whether fixed-row windowing is
+necessary.
 
 The exact command framing, cursor state, type model, lane invariants, renderer comparison, and
 security mitigations are recorded in `M1_COMMIT_GRAPH_RESEARCH.md`.

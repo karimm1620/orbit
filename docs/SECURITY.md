@@ -179,9 +179,10 @@ M1 B1 adds only the purpose-specific `get_commit_history_page` domain operation.
 opaque authorized repository ID, an optional opaque Rust-issued cursor, and an optional bounded
 page size. It does not accept paths, Git argument arrays, ref expressions, or arbitrary object
 expressions from React. A new request without a cursor starts a coherent history/ref session;
-continuations are single-use and remain bound to the same authorized repository root.
+successful continuations are single-use and remain bound to the same authorized repository root.
 
-Graph acquisition remains inside the existing `GitRunner`. The history command explicitly uses:
+Graph acquisition remains inside the existing `GitRunner`. Both the bounded topological OID-plan
+command and the per-page metadata command explicitly use:
 
 - `--no-pager`
 - `--no-lazy-fetch`
@@ -199,12 +200,16 @@ no-optional-locks process policy. Both parsers validate fixed framing and treat 
 as untrusted. SVG graph marks are presentation-only; repository-controlled text remains ordinary
 escaped React text and is never interpreted as HTML, a URL, or executable content.
 
-History sessions contain only bounded semantic traversal state. They expire after 15 minutes idle,
-are capped at eight active sessions, rotate their cursor after every successful page, and stop at
-1,000 emitted commits. The cursor is opaque transport state, not a replacement for repository
-authorization: Rust also revalidates the repository ID and canonical root on every request. If the
-root becomes unavailable or resolves differently, all sessions for that repository ID are
-invalidated. No Tauri capability was added for B1; the WebView retains only `core:default`.
+History sessions contain only bounded semantic traversal state: at most 1,000 planned OIDs plus a
+boolean recording whether a 1,001st sentinel existed. They expire after 15 minutes idle, are capped
+at eight active sessions, and stop at 1,000 emitted commits. A continuation marks its cursor in
+flight before Git metadata I/O without holding the registry mutex. Concurrent reuse fails;
+capability or page-read failure restores the old cursor, and successful page completion atomically
+rotates it. In-flight sessions are not evicted to admit another session. The cursor is opaque
+transport state, not a replacement for repository authorization: Rust also revalidates the
+repository ID and canonical root on every request. If the root becomes unavailable or resolves
+differently, all sessions for that repository ID are invalidated. No Tauri capability was added;
+the WebView retains only `core:default`.
 
 ---
 

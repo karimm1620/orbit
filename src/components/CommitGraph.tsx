@@ -1,7 +1,13 @@
 import type { KeyboardEvent } from "react";
 
 import type { CommitRef } from "../lib/tauri";
-import type { GraphEdge, GraphLaneId, GraphRow } from "../lib/topology";
+import { buildGraphColumns } from "../lib/graphLayout";
+import type {
+  GraphContinuation,
+  GraphEdge,
+  GraphLaneId,
+  GraphRow,
+} from "../lib/topology";
 
 const ROW_HEIGHT = 66;
 const LANE_WIDTH = 18;
@@ -9,12 +15,13 @@ const GRAPH_PADDING = 18;
 
 type CommitGraphProps = {
   rows: readonly GraphRow[];
+  continuation: GraphContinuation;
   selectedOid: string | null;
   onSelect: (oid: string) => void;
 };
 
-export function CommitGraph({ rows, selectedOid, onSelect }: CommitGraphProps) {
-  const columns = buildColumns(rows);
+export function CommitGraph({ rows, continuation, selectedOid, onSelect }: CommitGraphProps) {
+  const columns = buildGraphColumns(rows, continuation);
   const graphWidth = Math.min(220, Math.max(86, columns.maxColumns * LANE_WIDTH + GRAPH_PADDING * 2));
   const laneWidth = (graphWidth - GRAPH_PADDING * 2) / columns.maxColumns;
 
@@ -69,45 +76,6 @@ function handleRowKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number
   const nextIndex = event.key === "ArrowDown" ? Math.min(index + 1, rowCount - 1) : Math.max(index - 1, 0);
   const nextRow = document.querySelector<HTMLButtonElement>(`[data-commit-row-index="${nextIndex}"]`);
   nextRow?.focus();
-}
-
-type ColumnLayout = {
-  maxColumns: number;
-  byRow: Array<Map<GraphLaneId, number>>;
-};
-
-function buildColumns(rows: readonly GraphRow[]): ColumnLayout {
-  const lastUse = new Map<GraphLaneId, number>();
-  rows.forEach((row, index) => {
-    lastUse.set(row.node.laneId, index);
-    for (const edge of row.edges) {
-      lastUse.set(edge.fromLaneId, index);
-      lastUse.set(edge.toLaneId, index);
-    }
-  });
-
-  const activeColumns: GraphLaneId[] = [];
-  const byRow: Array<Map<GraphLaneId, number>> = [];
-  let maxColumns = 1;
-
-  rows.forEach((row, index) => {
-    const used = [row.node.laneId, ...row.edges.flatMap((edge) => [edge.fromLaneId, edge.toLaneId])];
-    for (const laneId of used) {
-      if (!activeColumns.includes(laneId)) activeColumns.push(laneId);
-    }
-
-    const columnMap = new Map<GraphLaneId, number>();
-    activeColumns.forEach((laneId, column) => columnMap.set(laneId, column));
-    byRow.push(columnMap);
-    maxColumns = Math.max(maxColumns, activeColumns.length);
-
-    for (let column = activeColumns.length - 1; column >= 0; column -= 1) {
-      const laneId = activeColumns[column];
-      if (lastUse.get(laneId) === index) activeColumns.splice(column, 1);
-    }
-  });
-
-  return { maxColumns, byRow };
 }
 
 function GraphStrip({

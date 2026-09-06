@@ -7,6 +7,7 @@ use crate::error::OrbitError;
 use super::{GitRunner, HeadSnapshot};
 
 const HISTORY_OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
+const HISTORY_ORDER_OUTPUT_LIMIT: usize = 128 * 1024;
 const REF_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
 const OBJECT_FORMAT_OUTPUT_LIMIT: usize = 1024;
 const HISTORY_FIELDS: usize = 7;
@@ -16,6 +17,7 @@ const MAX_REFS: usize = 4096;
 const MINIMUM_SAFE_JAVASCRIPT_INTEGER: i64 = -9_007_199_254_740_991;
 const MAXIMUM_SAFE_JAVASCRIPT_INTEGER: i64 = 9_007_199_254_740_991;
 const HISTORY_FORMAT_ARGUMENT: &str = "--format=%H%x00%h%x00%P%x00%an%x00%at%x00%ct%x00%s";
+const HISTORY_ORDER_FORMAT_ARGUMENT: &str = "--format=%H";
 const REF_FORMAT_ARGUMENT: &str = "--format=%(objectname)%00%(objecttype)%00%(*objectname)%00%(*objecttype)%00%(refname)%00%(symref)";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -162,23 +164,49 @@ pub fn read_commit_refs(
     parse_commit_refs(&output.stdout, object_format)
 }
 
-pub fn read_graph_commits(
+pub fn read_graph_order(
     runner: &GitRunner,
     root: &Path,
-    frontier: &[String],
+    starting_tips: &[String],
     limit: usize,
     object_format: ObjectFormat,
-) -> Result<Vec<GraphCommit>, OrbitError> {
-    if frontier.is_empty() || limit == 0 {
+) -> Result<Vec<String>, OrbitError> {
+    if starting_tips.is_empty() || limit == 0 {
         return Ok(Vec::new());
     }
-    for oid in frontier {
+    for oid in starting_tips {
         validate_oid(oid, object_format, "read_commit_history")?;
     }
 
     runner.require_no_lazy_fetch()?;
-    let arguments = graph_history_arguments(frontier, limit);
+    let arguments = graph_order_arguments(starting_tips, limit);
 
+    let output = runner.run(
+        Some(root),
+        "plan_commit_history",
+        arguments,
+        HISTORY_ORDER_OUTPUT_LIMIT,
+    )?;
+    let output = runner.require_success("plan_commit_history", output)?;
+
+    parse_graph_order(&output.stdout, object_format, limit)
+}
+
+pub fn read_graph_commit_page(
+    runner: &GitRunner,
+    root: &Path,
+    ordered_oids: &[String],
+    object_format: ObjectFormat,
+) -> Result<Vec<GraphCommit>, OrbitError> {
+    if ordered_oids.is_empty() {
+        return Ok(Vec::new());
+    }
+    for oid in ordered_oids {
+        validate_oid(oid, object_format, "read_commit_history")?;
+    }
+
+    runner.require_no_lazy_fetch()?;
+    let arguments = graph_page_arguments(ordered_oids);
     let output = runner.run(
         Some(root),
         "read_commit_history",
@@ -186,12 +214,41 @@ pub fn read_graph_commits(
         HISTORY_OUTPUT_LIMIT,
     )?;
     let output = runner.require_success("read_commit_history", output)?;
+    let commits = parse_graph_history(&output.stdout, object_format, ordered_oids.len())?;
+    if commits.len() != ordered_oids.len()
+        || commits
+            .iter()
+            .zip(ordered_oids)
+            .any(|(commit, expected_oid)| commit.oid != *expected_oid)
+    {
+        return Err(OrbitError::unsupported(
+            "read_commit_history",
+            "Git did not return the requested commit-history page in session order.",
+        ));
+    }
 
-    parse_graph_history(&output.stdout, object_format, limit)
+    Ok(commits)
 }
 
-fn graph_history_arguments(frontier: &[String], limit: usize) -> Vec<OsString> {
-    let mut arguments = Vec::with_capacity(19 + frontier.len());
+fn graph_order_arguments(starting_tips: &[String], limit: usize) -> Vec<OsString> {
+    let mut arguments = hardened_log_arguments(HISTORY_ORDER_FORMAT_ARGUMENT);
+    arguments.push(OsString::from("--topo-order"));
+    arguments.push(OsString::from(format!("--max-count={limit}")));
+    arguments.extend(starting_tips.iter().map(OsString::from));
+    arguments.push(OsString::from("--"));
+    arguments
+}
+
+fn graph_page_arguments(ordered_oids: &[String]) -> Vec<OsString> {
+    let mut arguments = hardened_log_arguments(HISTORY_FORMAT_ARGUMENT);
+    arguments.push(OsString::from("--no-walk=unsorted"));
+    arguments.extend(ordered_oids.iter().map(OsString::from));
+    arguments.push(OsString::from("--"));
+    arguments
+}
+
+fn hardened_log_arguments(format: &str) -> Vec<OsString> {
+    let mut arguments = Vec::with_capacity(19);
     arguments.extend(
         [
             "--no-pager",
@@ -202,21 +259,17 @@ fn graph_history_arguments(frontier: &[String], limit: usize) -> Vec<OsString> {
             "-c",
             "log.showSignature=false",
             "log",
-            "--topo-order",
             "--no-decorate",
             "--no-notes",
             "--no-patch",
             "--no-ext-diff",
             "--no-textconv",
             "--encoding=UTF-8",
-            HISTORY_FORMAT_ARGUMENT,
-            "-z",
         ]
         .map(OsString::from),
     );
-    arguments.push(OsString::from(format!("--max-count={limit}")));
-    arguments.extend(frontier.iter().map(OsString::from));
-    arguments.push(OsString::from("--"));
+    arguments.push(OsString::from(format));
+    arguments.push(OsString::from("-z"));
     arguments
 }
 
@@ -288,6 +341,49 @@ fn parse_graph_history(
             })
         })
         .collect()
+}
+
+fn parse_graph_order(
+    output: &[u8],
+    object_format: ObjectFormat,
+    maximum_commits: usize,
+) -> Result<Vec<String>, OrbitError> {
+    if output.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut fields: Vec<&[u8]> = output.split(|byte| *byte == 0).collect();
+    if fields.last() == Some(&&[][..]) {
+        fields.pop();
+    }
+    if fields.len() > maximum_commits {
+        return Err(OrbitError::output_too_large("parse_commit_history_order"));
+    }
+
+    let mut seen = HashSet::with_capacity(fields.len());
+    fields
+        .into_iter()
+        .map(|field| {
+            let oid = history_order_text(field)?;
+            validate_oid(oid, object_format, "parse_commit_history_order")?;
+            if !seen.insert(oid.to_owned()) {
+                return Err(OrbitError::unsupported(
+                    "parse_commit_history_order",
+                    "Git returned a duplicate commit in the history order.",
+                ));
+            }
+            Ok(oid.to_owned())
+        })
+        .collect()
+}
+
+fn history_order_text(value: &[u8]) -> Result<&str, OrbitError> {
+    std::str::from_utf8(value).map_err(|_| {
+        OrbitError::unsupported(
+            "parse_commit_history_order",
+            "A commit object ID is not valid UTF-8.",
+        )
+    })
 }
 
 fn parse_commit_refs(
@@ -522,6 +618,27 @@ mod tests {
     }
 
     #[test]
+    fn parses_and_bounds_a_nul_framed_commit_order() {
+        let fixture = format!("{A}\0{B}\0{C}\0");
+        let order = parse_graph_order(fixture.as_bytes(), ObjectFormat::Sha1, 3)
+            .expect("valid commit order");
+        assert_eq!(order, [A, B, C]);
+
+        let malformed =
+            parse_graph_order(b"not-an-oid\0", ObjectFormat::Sha1, 1).expect_err("malformed order");
+        assert_eq!(malformed.code, "unsupported_repository_state");
+
+        let invalid_utf8 =
+            parse_graph_order(&[0xff, 0], ObjectFormat::Sha1, 1).expect_err("invalid UTF-8 order");
+        assert_eq!(invalid_utf8.operation, "parse_commit_history_order");
+
+        let oversized_fixture = format!("{A}\0{B}\0");
+        let oversized = parse_graph_order(oversized_fixture.as_bytes(), ObjectFormat::Sha1, 1)
+            .expect_err("oversized order");
+        assert_eq!(oversized.operation, "parse_commit_history_order");
+    }
+
+    #[test]
     fn parses_all_ref_kinds_and_unicode_names() {
         let fixture = format!(
             "{A}\0commit\0\0\0refs/heads/main\0\n\
@@ -554,24 +671,31 @@ mod tests {
 
     #[test]
     fn history_arguments_keep_execution_surfaces_disabled() {
-        let arguments = graph_history_arguments(&[A.to_owned()], 1)
-            .into_iter()
-            .map(|argument| argument.into_string().expect("UTF-8 argument"))
-            .collect::<Vec<_>>();
+        let order = graph_order_arguments(&[A.to_owned()], 1);
+        let page = graph_page_arguments(&[A.to_owned()]);
+        assert!(order.iter().any(|argument| argument == "--topo-order"));
+        assert!(page.iter().any(|argument| argument == "--no-walk=unsorted"));
+        let commands = [order, page];
 
-        for argument in [
-            "--no-pager",
-            "--no-lazy-fetch",
-            "--no-optional-locks",
-            "log.showSignature=false",
-            "--no-decorate",
-            "--no-notes",
-            "--no-patch",
-            "--no-ext-diff",
-            "--no-textconv",
-        ] {
-            assert!(arguments.iter().any(|candidate| candidate == argument));
+        for command in commands {
+            let arguments = command
+                .into_iter()
+                .map(|argument| argument.into_string().expect("UTF-8 argument"))
+                .collect::<Vec<_>>();
+            for argument in [
+                "--no-pager",
+                "--no-lazy-fetch",
+                "--no-optional-locks",
+                "log.showSignature=false",
+                "--no-decorate",
+                "--no-notes",
+                "--no-patch",
+                "--no-ext-diff",
+                "--no-textconv",
+            ] {
+                assert!(arguments.iter().any(|candidate| candidate == argument));
+            }
+            assert_eq!(arguments.last().map(String::as_str), Some("--"));
         }
-        assert_eq!(arguments.last().map(String::as_str), Some("--"));
     }
 }

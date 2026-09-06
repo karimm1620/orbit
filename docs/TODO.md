@@ -11,7 +11,7 @@
 - [x] Research topological history ordering and machine-readable framing.
 - [x] Test native Git acquisition against a real nonlinear temporary repository.
 - [x] Decide ref acquisition and annotated-tag peeling.
-- [x] Decide opaque incremental cursor/frontier behavior.
+- [x] Decide opaque bounded topological-plan cursor behavior.
 - [x] Prototype deterministic lane allocation and page continuation.
 - [x] Decide DOM/SVG/Canvas rendering split.
 - [x] Decide initial virtualization policy.
@@ -27,7 +27,7 @@ The B2b graph workspace now consumes the bounded history service without adding 
 
 - [x] Add a purpose-specific Rust commit-graph history service.
 - [x] Capability-probe `--no-lazy-fetch`; fail closed for graph reads when unsupported.
-- [x] Query bounded `git log --topo-order` pages through the existing `GitRunner`.
+- [x] Capture one bounded `git log --topo-order` OID plan and read page metadata through the existing `GitRunner`.
 - [x] Parse seven-field NUL-framed commit records.
 - [x] Validate OIDs for the repository object format, parents, timestamps, UTF-8, and bounds.
 - [x] Cover linear, branch/merge, multiple-merge, octopus, detached, and unborn histories.
@@ -48,8 +48,9 @@ The B2b graph workspace now consumes the bounded history service without adding 
 ## 3. Incremental session and typed IPC
 
 - [x] Add a Rust-owned history session bound to an authorized repository ID.
-- [x] Keep unresolved frontier OIDs and emitted OIDs behind an opaque cursor.
-- [x] Default to 100 commits, reject requests above 200, cap active frontier tips at 512, and cap the session at 1,000.
+- [x] Keep the bounded ordered OID plan and next index behind an opaque cursor.
+- [x] Default to 100 commits, reject requests above 200, cap starting tips at 512, and cap the session at 1,000.
+- [x] Mark cursors in flight during page reads; restore on failure and rotate only after success.
 - [x] Expire stale history sessions and cap the process at eight active sessions.
 - [x] Restart the ref/history snapshot on explicit refresh.
 - [x] Add purpose-specific `get_commit_history_page` IPC and matching TypeScript types.
@@ -76,6 +77,7 @@ The B2b graph workspace now consumes the bounded history service without adding 
 - [x] Support empty, loading, incremental-loading, detached, unborn, and error states.
 - [x] Add commit selection and read-only commit details within M1 scope.
 - [x] Keep fixed row geometry compatible with future windowing.
+- [x] Keep unresolved continuation lanes visible through the loaded page boundary.
 - [x] Do not add graph, animation, global-state, or virtualization dependencies initially.
 
 ---
@@ -110,9 +112,10 @@ The B2b graph workspace now consumes the bounded history service without adding 
 - [x] `pnpm typecheck`
 - [x] `pnpm build`
 - [x] frontend topology tests (11 Vitest tests)
+- [x] frontend graph-layout continuation test (1 Vitest test)
 - [x] `cargo fmt --check`
 - [x] `cargo check --locked`
-- [x] `cargo test --locked` (46 Rust tests)
+- [x] `cargo test --locked` (52 Rust tests)
 - [x] `cargo clippy --locked --all-targets --all-features -- -D warnings`
 - [x] `pnpm tauri build --debug --no-bundle`
 - [ ] real-repository desktop smoke covering nonlinear history and load-more

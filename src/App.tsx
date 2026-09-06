@@ -13,7 +13,7 @@ import {
   selectRepository,
   toOrbitError,
 } from "./lib/tauri";
-import { createInitialTopologyState, reduceTopology, type GraphRow, type TopologyState } from "./lib/topology";
+import { createInitialTopologyState, reduceTopology, type GraphContinuation, type GraphRow, type TopologyState } from "./lib/topology";
 
 type RequestState = "idle" | "opening" | "refreshing";
 type HistoryRequestState = "idle" | "loading" | "loading-more";
@@ -21,6 +21,7 @@ type HistoryRequestState = "idle" | "loading" | "loading-more";
 type HistoryState = {
   rows: readonly GraphRow[];
   topology: TopologyState;
+  continuation: GraphContinuation;
   cursor: HistoryCursor | null;
   hasMore: boolean;
   sessionLimitReached: boolean;
@@ -30,7 +31,7 @@ type HistoryState = {
 };
 
 function createEmptyHistory(): HistoryState {
-  return { rows: [], topology: createInitialTopologyState(), cursor: null, hasMore: false, sessionLimitReached: false, head: null, status: "idle", error: null };
+  return { rows: [], topology: createInitialTopologyState(), continuation: { activeLanes: [], stubs: [] }, cursor: null, hasMore: false, sessionLimitReached: false, head: null, status: "idle", error: null };
 }
 
 function App() {
@@ -166,7 +167,7 @@ function RepositoryWorkspace({
       <section className="state-rail" aria-label="Current Git state"><div className="state-identity"><span className={`state-dot ${repository.workingTree.clean ? "clean" : "dirty"}`} aria-hidden="true" /><strong>{headLabel}</strong>{oid && <code>{oid}</code>}</div><div className="state-summary"><span>{repository.workingTree.clean ? "Working tree clean" : "Working tree changed"}</span><span>{repository.workingTree.staged + repository.workingTree.unstaged + repository.workingTree.untracked} changes</span></div></section>
       <section className="change-strip" aria-label="Working tree summary"><ChangeCount label="Staged" value={repository.workingTree.staged} /><ChangeCount label="Unstaged" value={repository.workingTree.unstaged} /><ChangeCount label="Untracked" value={repository.workingTree.untracked} /><ChangeCount label="Conflicted" value={repository.workingTree.conflicted} alert /><div className="upstream-summary"><span>Upstream</span><strong>{repository.head.upstream ?? "Not configured"}</strong>{repository.head.upstream && <small>{repository.head.ahead ?? 0} ahead, {repository.head.behind ?? 0} behind</small>}</div></section>
       <div className="workspace-grid">
-        <section className="history-panel" aria-labelledby="history-title"><div className="section-heading"><div><p className="eyebrow">History</p><h2 id="history-title">Commit graph</h2></div><span>{history.rows.length} loaded</span></div>{history.status === "loading" && history.rows.length === 0 ? <HistoryLoading /> : history.error && history.rows.length === 0 ? <HistoryError error={history.error} onRetry={onRefresh} /> : history.rows.length === 0 ? <HistoryEmpty /> : <><CommitGraph rows={history.rows} selectedOid={selectedOid} onSelect={onSelect} /><HistoryFooter history={history} onLoadMore={onLoadMore} onRetry={onRefresh} /></>}</section>
+        <section className="history-panel" aria-labelledby="history-title"><div className="section-heading"><div><p className="eyebrow">History</p><h2 id="history-title">Commit graph</h2></div><span>{history.rows.length} loaded</span></div>{history.status === "loading" && history.rows.length === 0 ? <HistoryLoading /> : history.error && history.rows.length === 0 ? <HistoryError error={history.error} onRetry={onRefresh} /> : history.rows.length === 0 ? <HistoryEmpty /> : <><CommitGraph rows={history.rows} continuation={history.continuation} selectedOid={selectedOid} onSelect={onSelect} /><HistoryFooter history={history} onLoadMore={onLoadMore} onRetry={onRefresh} /></>}</section>
         <CommitDetails commit={selectedCommit} refs={selectedRefs} />
       </div>
     </div>
@@ -176,7 +177,7 @@ function RepositoryWorkspace({
 function historyFromPage(page: CommitHistoryPage, previousTopology: TopologyState, previousRows: readonly GraphRow[] = []): HistoryState {
   const topologyInput = { commits: page.commits, head: page.head, ...(page.refs.length > 0 ? { refs: page.refs } : {}) };
   const reduced = reduceTopology(topologyInput, previousTopology);
-  return { rows: [...previousRows, ...reduced.rows], topology: reduced.state, cursor: page.nextCursor, hasMore: page.hasMore, sessionLimitReached: page.sessionLimitReached, head: page.head, status: "idle", error: null };
+  return { rows: [...previousRows, ...reduced.rows], topology: reduced.state, continuation: reduced.continuation, cursor: page.nextCursor, hasMore: page.hasMore, sessionLimitReached: page.sessionLimitReached, head: page.head, status: "idle", error: null };
 }
 
 function HistoryLoading() {
