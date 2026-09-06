@@ -211,6 +211,46 @@ repository ID and canonical root on every request. If the root becomes unavailab
 differently, all sessions for that repository ID are invalidated. No Tauri capability was added;
 the WebView retains only `core:default`.
 
+### M2 read-only changes/diff boundary
+
+The accepted M2 architecture adds only `get_repository_changes` and `get_file_diff`-style domain
+operations; production implementation is pending. A diff request contains an authorized repository
+ID, opaque Rust-issued change-set/file IDs, and a closed staged/unstaged side. It cannot contain a
+path, revision, pathspec, diff format, or Git argument. Rust retains byte-exact relative paths and
+validates the repository/root and handle binding before every read.
+
+Detailed status reuses M0's content-filter discovery/neutralization and `core.fsmonitor=false`, and
+adds the M1 fail-closed `--no-lazy-fetch` requirement. M2 diff commands must additionally set all of
+the following explicitly:
+
+- `--no-pager`
+- `--no-lazy-fetch`
+- `--no-optional-locks`
+- `--no-ext-diff`
+- `--no-textconv`
+- `--no-color`
+- bounded rename/copy detection and output formatting
+- `--` before every Rust-owned path argument
+
+Controlled repositories proved that a working-tree diff can execute configured clean filters,
+textconv programs, external diff programs, or a promisor remote when these protections are absent.
+Marker tests also proved the hardened command suppresses those executions. The implementation must
+retain those regressions; a secure-history capability failure also fails M2 closed rather than
+falling back to a potentially networked read.
+
+Untracked files use a purpose-specific, bounded Linux no-index comparison against `/dev/null`; this
+does not grant general file reading. Rust uses non-following metadata to reject directories and
+special files. Because a file can be replaced after validation and an untracked FIFO made Git block
+in a controlled test, M2 reads also require a 30-second deadline implemented inside the existing
+`GitRunner`, with child termination and bounded pipe draining. This extends the one process boundary
+rather than creating another one.
+
+Status paths are parsed as raw bytes. React sees only escaped display text and opaque file handles.
+Patch-header paths never establish identity. Rust validates a machine-framed numstat prefix before
+parsing bounded unified patch content into typed hunks. Binary, conflict, submodule, too-large,
+unsupported-encoding, timeout, stale, and unavailable conditions are explicit states; raw patch or
+unbounded diagnostic output is not an IPC contract. No Tauri capability expansion is required.
+
 ---
 
 ## 5. Repository authorization

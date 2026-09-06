@@ -528,18 +528,38 @@ security mitigations are recorded in `M1_COMMIT_GRAPH_RESEARCH.md`.
 
 ## 18. Diff architecture
 
-Diff handling should separate:
+M2 keeps change discovery, diff acquisition, patch parsing, and rendering as separate layers.
+Detailed state comes from one hardened, NUL-delimited porcelain v2 status read. Rust parses byte
+paths, derives the M0 summary from the same semantic entries, and returns independent staged and
+unstaged facets. Conflicts and submodules are explicit states rather than ordinary text diffs.
 
-- Git diff acquisition
-- patch parsing
-- domain model
-- visual rendering
+React receives only an opaque change-set ID and opaque file IDs. The process-local Rust registry
+retains byte-exact current/origin paths and the parsed change facets. Purpose-specific diff IPC
+accepts the authorized repository ID, change-set ID, file ID, and a closed staged/unstaged side; it
+never accepts paths, revisions, pathspecs, format strings, or Git arguments.
 
-Binary/large/unavailable diffs need explicit states.
+Staged patches use `git diff --cached`; unstaged patches use `git diff`. Untracked regular files and
+symlinks use a bounded Linux `git diff --no-index` comparison against `/dev/null`. All path
+arguments are Rust-owned and follow `--`. One numstat-plus-patch response provides machine-framed
+binary classification and unified patch data from the same Git invocation. Rust validates the
+numstat identity before a pure Rust patch parser produces typed hunks and lines. Patch header paths
+are never authoritative.
 
-Do not assume every changed file is UTF-8 text.
+Binary, conflicted, submodule, too-large, unsupported-encoding, special-file, timeout, stale, and
+unavailable results are explicit. Text patches must be valid UTF-8 initially; Orbit does not
+lossily decode them. Status and diff output, entries, retained paths, hunks, lines, registry state,
+diagnostics, and process duration all have fixed limits. A non-following file-type check and a
+GitRunner deadline protect untracked reads from special-file and replacement races.
 
-M2 should set conservative limits and profiling before attempting sophisticated highlighting.
+A successfully refreshed status list replaces the prior change set. Diff reads reauthorize the
+repository, validate all opaque handles, and compare a fresh hardened status record before
+acquisition. This is read-committed consistency: the selected Git command sees current content,
+while change-set IDs and frontend request generations prevent its response from being attached to
+a newer list.
+
+The exact command policy, byte/path model, initial bounds, experiments, and deferred cases are
+recorded in `M2_CHANGES_DIFF_RESEARCH.md`. No syntax-highlighting, file-watching, graph, database,
+or state-management dependency is approved by this architecture.
 
 ---
 
