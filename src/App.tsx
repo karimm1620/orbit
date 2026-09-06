@@ -48,7 +48,7 @@ function App() {
     setRequestState("opening");
     try {
       const selected = await selectRepository();
-      if (!selected) return;
+      if (!selected || pickerSequence !== requestSequence.current) return;
 
       const sequence = ++requestSequence.current;
       replacementSequence = sequence;
