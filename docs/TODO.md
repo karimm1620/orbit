@@ -24,14 +24,14 @@
 
 ## 1. Detailed changes service
 
-- [ ] Extend the existing status parser to return byte-safe semantic entries and derive M0 counts from them.
-- [ ] Parse ordinary, rename/copy, unmerged, and untracked porcelain v2 NUL records.
-- [ ] Represent staged and unstaged facets independently on one file entry.
-- [ ] Preserve raw current/origin paths only in Rust and expose deterministic escaped display text.
-- [ ] Add bounded opaque change-set/file handles tied to an authorized repository/root.
-- [ ] Add purpose-specific `get_repository_changes` IPC and matching TypeScript types.
-- [ ] Apply explicit rename/copy and submodule policies from the research decision.
-- [ ] Add parser bounds and structured malformed/stale/unavailable errors.
+- [x] Extend the existing status parser to return byte-safe semantic entries and derive M0 counts from them.
+- [x] Parse ordinary, rename/copy, unmerged, and untracked porcelain v2 NUL records.
+- [x] Represent staged and unstaged facets independently on one file entry.
+- [x] Preserve raw current/origin paths only in Rust and expose deterministic escaped display text.
+- [x] Add bounded opaque change-set/file handles tied to an authorized repository/root.
+- [x] Add purpose-specific `get_repository_changes` IPC and matching TypeScript types.
+- [x] Apply explicit rename/copy and submodule policies from the research decision.
+- [x] Add parser bounds and structured malformed/expired/replaced-handle errors.
 
 ---
 

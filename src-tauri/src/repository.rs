@@ -11,10 +11,11 @@ use std::{
 use serde::Serialize;
 
 use crate::{
+    change_sets::{ChangeSetRegistry, RepositoryChanges},
     error::OrbitError,
     git::{
-        read_recent_commits, read_status, CommitSummary, GitRunner, HeadSnapshot,
-        WorkingTreeSnapshot,
+        read_detailed_status, read_recent_commits, read_status, CommitSummary, GitRunner,
+        HeadSnapshot, WorkingTreeSnapshot,
     },
     history_sessions::{CommitHistoryPage, CommitHistoryRegistry},
 };
@@ -37,6 +38,7 @@ pub struct RepositoryRegistry {
     next_id: AtomicU64,
     runner: GitRunner,
     histories: CommitHistoryRegistry,
+    changes: ChangeSetRegistry,
 }
 
 impl Default for RepositoryRegistry {
@@ -46,6 +48,7 @@ impl Default for RepositoryRegistry {
             next_id: AtomicU64::new(1),
             runner: GitRunner::default(),
             histories: CommitHistoryRegistry::default(),
+            changes: ChangeSetRegistry::default(),
         }
     }
 }
@@ -98,6 +101,18 @@ impl RepositoryRegistry {
         }
     }
 
+    pub fn repository_changes(&self, repository_id: &str) -> Result<RepositoryChanges, OrbitError> {
+        let root = self.authorized_root(repository_id)?;
+        let status = read_detailed_status(&self.runner, &root)?;
+        self.changes.install(
+            repository_id,
+            &root,
+            status.head,
+            status.working_tree,
+            status.changes,
+        )
+    }
+
     fn authorized_root(&self, repository_id: &str) -> Result<PathBuf, OrbitError> {
         if !valid_repository_id(repository_id) {
             return Err(OrbitError::repository_unavailable(
@@ -130,6 +145,7 @@ impl RepositoryRegistry {
                 };
                 if error.code == "repository_unavailable" {
                     self.histories.invalidate_repository(repository_id)?;
+                    self.changes.invalidate_repository(repository_id)?;
                 }
                 return Err(error);
             }
@@ -137,6 +153,7 @@ impl RepositoryRegistry {
 
         if resolved != root {
             self.histories.invalidate_repository(repository_id)?;
+            self.changes.invalidate_repository(repository_id)?;
             return Err(OrbitError::repository_unavailable(
                 "The opened repository now resolves to a different working tree.",
             ));
@@ -283,7 +300,7 @@ mod tests {
 
     use crate::git::{
         history_starting_tips, read_graph_commit_page, read_graph_order, read_object_format,
-        CommitHistoryHead, CommitRefKind,
+        ChangeKind, CommitHistoryHead, CommitRefKind, ConflictKind,
     };
     use crate::history_sessions::MAX_HISTORY_SESSION_COMMITS;
 
@@ -503,6 +520,15 @@ mod tests {
 
         assert_eq!(snapshot.working_tree.unstaged, 1);
         assert!(!marker.exists());
+
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("authorize filtered repository");
+        registry
+            .repository_changes(&opened.repository_id)
+            .expect("read detailed status without executing filters");
+        assert!(!marker.exists());
     }
 
     #[test]
@@ -522,6 +548,10 @@ mod tests {
 
         assert_eq!(snapshot.root, selected.root.to_string_lossy());
         assert_eq!(snapshot.recent_commits[0].subject, "Selected repository");
+        let changes = registry
+            .repository_changes(&snapshot.repository_id)
+            .expect("read selected repository changes");
+        assert_eq!(changes.repository_id, snapshot.repository_id);
         let history = registry
             .commit_history_page(&snapshot.repository_id, None, Some(1))
             .expect("read selected repository history");
@@ -732,6 +762,9 @@ mod tests {
         let opened = registry
             .open(repository.root.clone())
             .expect("open configured repository");
+        registry
+            .repository_changes(&opened.repository_id)
+            .expect("read protected detailed status");
         registry
             .commit_history_page(&opened.repository_id, None, Some(1))
             .expect("read protected graph history");
@@ -1273,6 +1306,12 @@ mod tests {
             .commit_history_page(&opened.repository_id, None, Some(1))
             .expect("start history");
         let cursor = first.next_cursor.expect("continuation cursor");
+        repository.write("untracked.txt", "untracked\n");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("start change set");
+        let change_set_id = changes.change_set_id.as_str().to_owned();
+        let file_id = changes.files[0].file_id.as_str().to_owned();
 
         let original = repository.root.clone();
         let moved = original.with_file_name(format!(
@@ -1294,5 +1333,279 @@ mod tests {
             .commit_history_page(&opened.repository_id, Some(cursor.as_str()), Some(1))
             .expect_err("unavailable repository invalidates its sessions");
         assert_eq!(invalidated.code, "history_session_unavailable");
+        let invalidated_changes = registry
+            .changes
+            .authorize_for_test(
+                &opened.repository_id,
+                &repository.root,
+                &change_set_id,
+                &file_id,
+            )
+            .expect_err("unavailable repository invalidates its change sets");
+        assert_eq!(invalidated_changes.code, "change_set_unavailable");
+    }
+
+    #[test]
+    fn detailed_changes_are_semantic_bounded_handles_and_replace_atomically() {
+        let repository = TestRepository::new();
+        repository.commit_file("both.txt", "base\n", "Base");
+        repository.commit_file("rename-source.txt", "rename\n", "Rename source");
+        repository.commit_file("delete.txt", "delete\n", "Delete source");
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open detailed-status repository");
+
+        repository.write("both.txt", "staged\n");
+        repository.git_ok(["add", "--", "both.txt"]);
+        repository.write("both.txt", "staged and unstaged\n");
+        repository.git_ok(["mv", "--", "rename-source.txt", "renamed.txt"]);
+        repository.git_ok(["rm", "--", "delete.txt"]);
+        for name in [
+            "space name.txt",
+            "unicodé.txt",
+            "-leading.txt",
+            "line\nbreak.txt",
+        ] {
+            repository.write(name, "untracked\n");
+        }
+
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("read detailed changes");
+        let snapshot = registry
+            .snapshot(&opened.repository_id)
+            .expect("read matching M0 summary");
+        assert_eq!(changes.summary, snapshot.working_tree);
+        assert_eq!(changes.summary.staged, 3);
+        assert_eq!(changes.summary.unstaged, 1);
+        assert_eq!(changes.summary.untracked, 4);
+
+        let both = changes
+            .files
+            .iter()
+            .find(|file| file.path.text == "both.txt")
+            .expect("both-sided file");
+        assert_eq!(
+            both.staged.as_ref().map(|facet| facet.kind),
+            Some(ChangeKind::Modified)
+        );
+        assert_eq!(
+            both.unstaged.as_ref().map(|facet| facet.kind),
+            Some(ChangeKind::Modified)
+        );
+        let renamed = changes
+            .files
+            .iter()
+            .find(|file| file.path.text == "renamed.txt")
+            .expect("renamed file");
+        assert_eq!(
+            renamed.staged.as_ref().map(|facet| facet.kind),
+            Some(ChangeKind::Renamed)
+        );
+        assert_eq!(
+            renamed
+                .original_path
+                .as_ref()
+                .map(|path| path.text.as_str()),
+            Some("rename-source.txt")
+        );
+        let line_break = changes
+            .files
+            .iter()
+            .find(|file| file.path.text == "line\\nbreak.txt")
+            .expect("escaped path");
+        assert!(line_break.path.escaped);
+
+        let old_change_set = changes.change_set_id.as_str().to_owned();
+        let old_file = changes.files[0].file_id.as_str().to_owned();
+        let replacement = registry
+            .repository_changes(&opened.repository_id)
+            .expect("replace detailed changes");
+        assert_ne!(replacement.change_set_id.as_str(), old_change_set);
+        let old_error = registry
+            .changes
+            .authorize_for_test(
+                &opened.repository_id,
+                &repository.root,
+                &old_change_set,
+                &old_file,
+            )
+            .expect_err("old change set is stale after successful refresh");
+        assert_eq!(old_error.code, "change_set_unavailable");
+        registry
+            .changes
+            .authorize_for_test(
+                &opened.repository_id,
+                &repository.root,
+                replacement.change_set_id.as_str(),
+                replacement.files[0].file_id.as_str(),
+            )
+            .expect("new handles remain authorized");
+    }
+
+    #[test]
+    fn detailed_changes_return_typed_conflicts() {
+        let repository = TestRepository::new();
+        repository.commit_file("conflict.txt", "base\n", "Base");
+        repository.git_ok(["checkout", "-b", "feature"]);
+        repository.commit_file("conflict.txt", "feature\n", "Feature");
+        repository.git_ok(["checkout", "main"]);
+        repository.commit_file("conflict.txt", "main\n", "Main");
+        repository.git_failure(["merge", "feature"]);
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open conflicted repository");
+
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("read conflicted changes");
+        assert_eq!(changes.files.len(), 1);
+        assert_eq!(changes.files[0].conflict, Some(ConflictKind::BothModified));
+        assert_eq!(changes.files[0].staged, None);
+        assert_eq!(changes.files[0].unstaged, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detailed_changes_escape_invalid_path_bytes_and_report_type_changes() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt, os::unix::fs::symlink};
+
+        let repository = TestRepository::new();
+        repository.commit_file("mode.txt", "mode\n", "Mode");
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open byte-path repository");
+        let invalid_name = OsString::from_vec(b"invalid-\xff.txt".to_vec());
+        fs::write(repository.root.join(invalid_name), b"invalid\n")
+            .expect("write invalid-byte path");
+        fs::remove_file(repository.root.join("mode.txt")).expect("remove regular file");
+        symlink("target", repository.root.join("mode.txt")).expect("replace with symlink");
+
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("read byte-safe changes");
+        let invalid = changes
+            .files
+            .iter()
+            .find(|file| file.path.text == "invalid-\\xFF.txt")
+            .expect("escaped invalid-byte file");
+        assert!(invalid.path.escaped);
+        let mode = changes
+            .files
+            .iter()
+            .find(|file| file.path.text == "mode.txt")
+            .expect("type-changed file");
+        assert_eq!(
+            mode.unstaged.as_ref().map(|facet| facet.kind),
+            Some(ChangeKind::TypeChanged)
+        );
+        assert_eq!(
+            mode.unstaged
+                .as_ref()
+                .and_then(|facet| facet.old_mode.as_deref()),
+            Some("100644")
+        );
+        assert_eq!(
+            mode.unstaged
+                .as_ref()
+                .and_then(|facet| facet.new_mode.as_deref()),
+            Some("120000")
+        );
+    }
+
+    #[test]
+    fn detailed_changes_require_an_authorized_repository() {
+        let error = RepositoryRegistry::default()
+            .repository_changes("repository-000000000000ffff")
+            .expect_err("unknown repository is unauthorized");
+        assert_eq!(error.code, "repository_unavailable");
+    }
+
+    #[test]
+    fn detailed_changes_detect_real_staged_copies() {
+        let repository = TestRepository::new();
+        repository.commit_file("source.txt", "base\n", "Copy source");
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open copy repository");
+        repository.write("source.txt", "base\nnew\n");
+        repository.write("copy.txt", "base\nnew\n");
+        repository.git_ok(["add", "--", "source.txt", "copy.txt"]);
+
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("read copy changes");
+        let copied = changes
+            .files
+            .iter()
+            .find(|file| file.path.text == "copy.txt")
+            .expect("copy entry");
+        assert_eq!(
+            copied.staged.as_ref().map(|facet| facet.kind),
+            Some(ChangeKind::Copied)
+        );
+        assert_eq!(
+            copied.original_path.as_ref().map(|path| path.text.as_str()),
+            Some("source.txt")
+        );
+    }
+
+    #[test]
+    fn detailed_changes_handle_an_unborn_repository() {
+        let repository = TestRepository::new();
+        repository.write("first.txt", "first\n");
+        repository.git_ok(["add", "--", "first.txt"]);
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open unborn repository");
+
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("read unborn changes");
+        assert_eq!(changes.head.oid, None);
+        assert_eq!(changes.head.branch.as_deref(), Some("main"));
+        assert_eq!(changes.files.len(), 1);
+        assert_eq!(
+            changes.files[0].staged.as_ref().map(|facet| facet.kind),
+            Some(ChangeKind::Added)
+        );
+    }
+
+    #[test]
+    fn failed_detailed_refresh_preserves_the_prior_change_set() {
+        let repository = TestRepository::new();
+        repository.commit_file("tracked.txt", "base\n", "Base");
+        repository.write("tracked.txt", "changed\n");
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open refresh repository");
+        let first = registry
+            .repository_changes(&opened.repository_id)
+            .expect("create first change set");
+        let change_set_id = first.change_set_id.as_str().to_owned();
+        let file_id = first.files[0].file_id.as_str().to_owned();
+
+        let oversized_driver = "a".repeat(1025);
+        let key = format!("filter.{oversized_driver}.clean");
+        repository.git_ok(["config", key.as_str(), "cat"]);
+        let failed = registry
+            .repository_changes(&opened.repository_id)
+            .expect_err("oversized filter name rejects refreshed status");
+        assert_eq!(failed.code, "git_command_failed");
+        registry
+            .changes
+            .authorize_for_test(
+                &opened.repository_id,
+                &repository.root,
+                &change_set_id,
+                &file_id,
+            )
+            .expect("failed refresh leaves old handles authorized");
     }
 }

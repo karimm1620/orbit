@@ -4,6 +4,7 @@ use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::{
+    change_sets::RepositoryChanges,
     error::OrbitError,
     history_sessions::CommitHistoryPage,
     repository::{RepositoryRegistry, RepositorySnapshot},
@@ -54,6 +55,23 @@ pub async fn get_repository_snapshot(
             OrbitError::internal(
                 "read_repository",
                 "The repository reader stopped unexpectedly.",
+            )
+        })?
+}
+
+#[tauri::command]
+pub async fn get_repository_changes(
+    repository_id: String,
+    repositories: State<'_, Arc<RepositoryRegistry>>,
+) -> Result<RepositoryChanges, OrbitError> {
+    let repositories = Arc::clone(&repositories);
+
+    tauri::async_runtime::spawn_blocking(move || repositories.repository_changes(&repository_id))
+        .await
+        .map_err(|_| {
+            OrbitError::internal(
+                "read_repository_changes",
+                "The repository changes reader stopped unexpectedly.",
             )
         })?
 }

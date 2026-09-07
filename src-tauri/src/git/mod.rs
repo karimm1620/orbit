@@ -11,4 +11,9 @@ pub use graph::{
 };
 pub use history::{read_recent_commits, CommitSummary};
 pub use process::GitRunner;
-pub use status::{read_status, HeadSnapshot, WorkingTreeSnapshot};
+#[cfg(test)]
+pub use status::ChangeKind;
+pub(crate) use status::{read_detailed_status, StatusEntry};
+pub use status::{
+    read_status, ChangeFacet, ConflictKind, HeadSnapshot, SubmoduleState, WorkingTreeSnapshot,
+};

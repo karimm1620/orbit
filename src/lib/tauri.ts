@@ -6,6 +6,12 @@ export type RepositoryId = string & { readonly [repositoryIdBrand]: true };
 declare const historyCursorBrand: unique symbol;
 export type HistoryCursor = string & { readonly [historyCursorBrand]: true };
 
+declare const changeSetIdBrand: unique symbol;
+export type ChangeSetId = string & { readonly [changeSetIdBrand]: true };
+
+declare const fileIdBrand: unique symbol;
+export type FileId = string & { readonly [fileIdBrand]: true };
+
 export type RepositorySnapshot = {
   repositoryId: RepositoryId;
   root: string;
@@ -83,6 +89,58 @@ export type CommitHistoryPage = {
   sessionLimitReached: boolean;
 };
 
+export type ChangeKind =
+  | "added"
+  | "modified"
+  | "deleted"
+  | "renamed"
+  | "copied"
+  | "typeChanged"
+  | "untracked";
+
+export type ChangeFacet = {
+  kind: ChangeKind;
+  oldMode: string | null;
+  newMode: string | null;
+  similarity: number | null;
+};
+
+export type ConflictKind =
+  | "bothDeleted"
+  | "addedByUs"
+  | "deletedByThem"
+  | "addedByThem"
+  | "deletedByUs"
+  | "bothAdded"
+  | "bothModified";
+
+export type RepositoryPathDisplay = {
+  text: string;
+  escaped: boolean;
+};
+
+export type ChangedFile = {
+  fileId: FileId;
+  path: RepositoryPathDisplay;
+  originalPath: RepositoryPathDisplay | null;
+  staged: ChangeFacet | null;
+  unstaged: ChangeFacet | null;
+  conflict: ConflictKind | null;
+  submodule: {
+    commitChanged: boolean;
+    trackedChanges: boolean;
+    untrackedChanges: boolean;
+  } | null;
+};
+
+export type RepositoryChanges = {
+  repositoryId: RepositoryId;
+  changeSetId: ChangeSetId;
+  head: RepositorySnapshot["head"];
+  summary: RepositorySnapshot["workingTree"];
+  files: ChangedFile[];
+};
+
 export function selectRepository(): Promise<RepositorySnapshot | null> {
   return invoke<RepositorySnapshot | null>("select_repository");
 }
@@ -93,6 +151,12 @@ export function getRepositorySnapshot(
   return invoke<RepositorySnapshot>("get_repository_snapshot", {
     repositoryId,
   });
+}
+
+export function getRepositoryChanges(
+  repositoryId: RepositoryId,
+): Promise<RepositoryChanges> {
+  return invoke<RepositoryChanges>("get_repository_changes", { repositoryId });
 }
 
 export function getCommitHistoryPage(

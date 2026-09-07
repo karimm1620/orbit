@@ -105,6 +105,17 @@ impl OrbitError {
         }
     }
 
+    pub fn change_set_unavailable() -> Self {
+        Self {
+            code: "change_set_unavailable",
+            title: "Changes need to refresh",
+            message: "This change list is invalid, expired, or has been replaced. Refresh the repository changes to continue.".into(),
+            operation: "read_repository_changes",
+            recoverable: true,
+            details: None,
+        }
+    }
+
     pub fn git_failed(operation: &'static str, stderr: &[u8]) -> Self {
         let detail = String::from_utf8_lossy(stderr);
         let detail = sanitize_diagnostic(detail.trim());

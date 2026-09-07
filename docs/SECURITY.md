@@ -213,11 +213,17 @@ the WebView retains only `core:default`.
 
 ### M2 read-only changes/diff boundary
 
-The accepted M2 architecture adds only `get_repository_changes` and `get_file_diff`-style domain
-operations; production implementation is pending. A diff request contains an authorized repository
-ID, opaque Rust-issued change-set/file IDs, and a closed staged/unstaged side. It cannot contain a
-path, revision, pathspec, diff format, or Git argument. Rust retains byte-exact relative paths and
-validates the repository/root and handle binding before every read.
+M2's implemented `get_repository_changes` domain operation accepts only an authorized repository
+ID. Rust runs the hardened detailed-status query, retains byte-exact relative current/origin paths,
+and returns deterministic display text with opaque Rust-issued change-set/file IDs. Change sets are
+repository/root-bound, process-local, capped at eight active entries, expire after 15 minutes idle,
+and are installed only after the full status result succeeds; a successful refresh retires the
+prior set for that repository. The WebView cannot submit a path, revision, pathspec, format, or Git
+argument.
+
+The accepted `get_file_diff`-style operation remains pending. Its future request contains the
+authorized repository ID, change-set/file IDs, and a closed staged/unstaged side, and Rust must
+reauthorize the repository/root and handle binding before every read.
 
 Detailed status reuses M0's content-filter discovery/neutralization and `core.fsmonitor=false`, and
 adds the M1 fail-closed `--no-lazy-fetch` requirement. M2 diff commands must additionally set all of

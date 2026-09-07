@@ -282,7 +282,8 @@ Good direction:
 select_repository()
 get_repository_snapshot(repository_id)
 get_commit_history_page(repository_id, cursor, page_size)
-get_file_diff(repository_id, file_id)
+get_repository_changes(repository_id)
+get_file_diff(repository_id, change_set_id, file_id, side)
 stage_file(repository_id, file_id)
 switch_branch(repository_id, branch_name)
 ```
@@ -537,6 +538,11 @@ React receives only an opaque change-set ID and opaque file IDs. The process-loc
 retains byte-exact current/origin paths and the parsed change facets. Purpose-specific diff IPC
 accepts the authorized repository ID, change-set ID, file ID, and a closed staged/unstaged side; it
 never accepts paths, revisions, pathspecs, format strings, or Git arguments.
+
+The first M2 slice implements `get_repository_changes` with this detailed parser and registry.
+Change sets are repository/root-bound, limited to eight active entries, expire after 15 minutes
+idle, and are replaced only after a new status read succeeds. The typed diff operation and patch
+parser described below remain deferred to the next M2 slice.
 
 Staged patches use `git diff --cached`; unstaged patches use `git diff`. Untracked regular files and
 symlinks use a bounded Linux `git diff --no-index` comparison against `/dev/null`. All path
