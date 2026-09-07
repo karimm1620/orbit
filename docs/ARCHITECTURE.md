@@ -541,7 +541,11 @@ never accepts paths, revisions, pathspecs, format strings, or Git arguments.
 
 The first M2 slice implements `get_repository_changes` with this detailed parser and registry.
 Change sets are repository/root-bound, limited to eight active entries, expire after 15 minutes
-idle, and are replaced only after a new status read succeeds. The typed diff operation and patch
+idle, and are replaced only after a new status read succeeds. A monotonic Rust-owned generation is
+reserved before blocking repository/status work; only the latest generation for that repository
+may install. This prevents an older worker from invalidating a newer successful refresh when
+completion order differs from request order. Failed or superseded refreshes leave the prior valid
+change set intact when repository authorization remains valid. The typed diff operation and patch
 parser described below remain deferred to the next M2 slice.
 
 Staged patches use `git diff --cached`; unstaged patches use `git diff`. Untracked regular files and

@@ -116,6 +116,17 @@ impl OrbitError {
         }
     }
 
+    pub fn changes_refresh_superseded() -> Self {
+        Self {
+            code: "changes_refresh_superseded",
+            title: "A newer refresh is available",
+            message: "This repository-changes request was superseded by a newer refresh.".into(),
+            operation: "read_repository_changes",
+            recoverable: true,
+            details: None,
+        }
+    }
+
     pub fn git_failed(operation: &'static str, stderr: &[u8]) -> Self {
         let detail = String::from_utf8_lossy(stderr);
         let detail = sanitize_diagnostic(detail.trim());

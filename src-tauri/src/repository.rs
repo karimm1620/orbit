@@ -102,11 +102,18 @@ impl RepositoryRegistry {
     }
 
     pub fn repository_changes(&self, repository_id: &str) -> Result<RepositoryChanges, OrbitError> {
-        let root = self.authorized_root(repository_id)?;
+        // Reserve order before repository validation can block on Git, so worker
+        // scheduling cannot make an older request authoritative over a newer one.
+        let generation = self.changes.reserve_refresh();
+        let root = self.registered_root(repository_id)?;
+        self.changes
+            .begin_refresh(repository_id, &root, generation)?;
+        self.revalidate_root(repository_id, &root)?;
         let status = read_detailed_status(&self.runner, &root)?;
         self.changes.install(
             repository_id,
             &root,
+            generation,
             status.head,
             status.working_tree,
             status.changes,
@@ -114,14 +121,19 @@ impl RepositoryRegistry {
     }
 
     fn authorized_root(&self, repository_id: &str) -> Result<PathBuf, OrbitError> {
+        let root = self.registered_root(repository_id)?;
+        self.revalidate_root(repository_id, &root)?;
+        Ok(root)
+    }
+
+    fn registered_root(&self, repository_id: &str) -> Result<PathBuf, OrbitError> {
         if !valid_repository_id(repository_id) {
             return Err(OrbitError::repository_unavailable(
                 "This repository is no longer authorized in the current Orbit session.",
             ));
         }
 
-        let root = self
-            .roots
+        self.roots
             .read()
             .map_err(|_| {
                 OrbitError::internal("read_repository", "Repository state is unavailable.")
@@ -132,8 +144,11 @@ impl RepositoryRegistry {
                 OrbitError::repository_unavailable(
                     "This repository is no longer authorized in the current Orbit session.",
                 )
-            })?;
-        let resolved = match resolve_repository(&self.runner, &root) {
+            })
+    }
+
+    fn revalidate_root(&self, repository_id: &str, root: &Path) -> Result<(), OrbitError> {
+        let resolved = match resolve_repository(&self.runner, root) {
             Ok(resolved) => resolved,
             Err(error) => {
                 let error = if error.code == "not_a_repository" {
@@ -159,7 +174,7 @@ impl RepositoryRegistry {
             ));
         }
 
-        Ok(root)
+        Ok(())
     }
 
     fn next_repository_id(&self) -> String {

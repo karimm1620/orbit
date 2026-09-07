@@ -28,6 +28,9 @@ pub struct ChangeSetId(String);
 #[serde(transparent)]
 pub struct FileId(String);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ChangesRefreshGeneration(u64);
+
 impl ChangeSetId {
     #[cfg(test)]
     pub fn as_str(&self) -> &str {
@@ -116,8 +119,21 @@ struct ChangeSet {
     last_access: Instant,
 }
 
+#[derive(Debug)]
+struct RefreshAuthority {
+    generation: ChangesRefreshGeneration,
+    root: PathBuf,
+}
+
+#[derive(Default)]
+struct ChangeSetRegistryState {
+    change_sets: HashMap<String, ChangeSet>,
+    latest_refreshes: HashMap<String, RefreshAuthority>,
+}
+
 pub struct ChangeSetRegistry {
-    change_sets: Mutex<HashMap<String, ChangeSet>>,
+    state: Mutex<ChangeSetRegistryState>,
+    next_refresh: AtomicU64,
     next_change_set: AtomicU64,
     next_file: AtomicU64,
 }
@@ -125,7 +141,8 @@ pub struct ChangeSetRegistry {
 impl Default for ChangeSetRegistry {
     fn default() -> Self {
         Self {
-            change_sets: Mutex::new(HashMap::new()),
+            state: Mutex::new(ChangeSetRegistryState::default()),
+            next_refresh: AtomicU64::new(1),
             next_change_set: AtomicU64::new(1),
             next_file: AtomicU64::new(1),
         }
@@ -133,10 +150,39 @@ impl Default for ChangeSetRegistry {
 }
 
 impl ChangeSetRegistry {
+    pub fn reserve_refresh(&self) -> ChangesRefreshGeneration {
+        ChangesRefreshGeneration(self.next_refresh.fetch_add(1, Ordering::Relaxed))
+    }
+
+    pub fn begin_refresh(
+        &self,
+        repository_id: &str,
+        root: &Path,
+        generation: ChangesRefreshGeneration,
+    ) -> Result<ChangesRefreshGeneration, OrbitError> {
+        let mut state = self.lock_state()?;
+        if state
+            .latest_refreshes
+            .get(repository_id)
+            .is_some_and(|latest| latest.generation.0 >= generation.0)
+        {
+            return Err(OrbitError::changes_refresh_superseded());
+        }
+        state.latest_refreshes.insert(
+            repository_id.to_owned(),
+            RefreshAuthority {
+                generation,
+                root: root.to_owned(),
+            },
+        );
+        Ok(generation)
+    }
+
     pub fn install(
         &self,
         repository_id: &str,
         root: &Path,
+        generation: ChangesRefreshGeneration,
         head: HeadSnapshot,
         summary: WorkingTreeSnapshot,
         entries: Vec<StatusEntry>,
@@ -151,14 +197,25 @@ impl ChangeSetRegistry {
             .zip(entries.into_iter().map(StoredFile::from))
             .collect::<HashMap<_, _>>();
         let now = Instant::now();
-        let mut change_sets = self.lock_change_sets()?;
-        prune_expired(&mut change_sets, now);
+        let mut state = self.lock_state()?;
+        let is_current = state
+            .latest_refreshes
+            .get(repository_id)
+            .is_some_and(|latest| latest.generation == generation && latest.root == root);
+        if !is_current {
+            return Err(OrbitError::changes_refresh_superseded());
+        }
+        prune_expired(&mut state.change_sets, now);
 
         // Only a fully parsed status result reaches installation. Replacing the old
-        // repository entry inside this lock makes successful refresh authoritative.
-        change_sets.retain(|_, change_set| change_set.repository_id != repository_id);
-        if change_sets.len() >= MAX_ACTIVE_CHANGE_SETS {
-            let oldest = change_sets
+        // repository entry while checking its generation inside this same lock makes
+        // request start order authoritative rather than worker completion order.
+        state
+            .change_sets
+            .retain(|_, change_set| change_set.repository_id != repository_id);
+        if state.change_sets.len() >= MAX_ACTIVE_CHANGE_SETS {
+            let oldest = state
+                .change_sets
                 .iter()
                 .min_by(|(left_id, left), (right_id, right)| {
                     left.last_access
@@ -167,9 +224,9 @@ impl ChangeSetRegistry {
                 })
                 .map(|(id, _)| id.clone())
                 .ok_or_else(OrbitError::change_set_unavailable)?;
-            change_sets.remove(&oldest);
+            state.change_sets.remove(&oldest);
         }
-        change_sets.insert(
+        state.change_sets.insert(
             change_set_id.clone(),
             ChangeSet {
                 repository_id: repository_id.to_owned(),
@@ -183,7 +240,7 @@ impl ChangeSetRegistry {
             .iter()
             .map(|file_id| {
                 authorize_file(
-                    &mut change_sets,
+                    &mut state.change_sets,
                     repository_id,
                     root,
                     &change_set_id,
@@ -204,8 +261,10 @@ impl ChangeSetRegistry {
     }
 
     pub fn invalidate_repository(&self, repository_id: &str) -> Result<(), OrbitError> {
-        let mut change_sets = self.lock_change_sets()?;
-        change_sets.retain(|_, change_set| change_set.repository_id != repository_id);
+        let mut state = self.lock_state()?;
+        state
+            .change_sets
+            .retain(|_, change_set| change_set.repository_id != repository_id);
         Ok(())
     }
 
@@ -217,9 +276,9 @@ impl ChangeSetRegistry {
         change_set_id: &str,
         file_id: &str,
     ) -> Result<(), OrbitError> {
-        let mut change_sets = self.lock_change_sets()?;
+        let mut state = self.lock_state()?;
         authorize_file(
-            &mut change_sets,
+            &mut state.change_sets,
             repository_id,
             root,
             change_set_id,
@@ -229,10 +288,8 @@ impl ChangeSetRegistry {
         .map(|_| ())
     }
 
-    fn lock_change_sets(
-        &self,
-    ) -> Result<std::sync::MutexGuard<'_, HashMap<String, ChangeSet>>, OrbitError> {
-        self.change_sets.lock().map_err(|_| {
+    fn lock_state(&self) -> Result<std::sync::MutexGuard<'_, ChangeSetRegistryState>, OrbitError> {
+        self.state.lock().map_err(|_| {
             OrbitError::internal(
                 "read_repository_changes",
                 "Repository change-set state is unavailable.",
@@ -382,6 +439,20 @@ mod tests {
         }
     }
 
+    fn install_changes(
+        registry: &ChangeSetRegistry,
+        repository_id: &str,
+        root: &Path,
+        entries: Vec<StatusEntry>,
+    ) -> RepositoryChanges {
+        let generation = registry
+            .begin_refresh(repository_id, root, registry.reserve_refresh())
+            .expect("begin change refresh");
+        registry
+            .install(repository_id, root, generation, head(), summary(), entries)
+            .expect("install change set")
+    }
+
     #[test]
     fn escapes_controls_backslashes_and_invalid_bytes_without_losing_unicode() {
         let display = display_path("unicodé\\tab\tline\n".as_bytes());
@@ -401,30 +472,24 @@ mod tests {
     fn replacement_invalidates_old_handles_and_rejects_cross_repository_access() {
         let registry = ChangeSetRegistry::default();
         let root = Path::new("/tmp/orbit-change-set-a");
-        let first = registry
-            .install(
-                "repository-0000000000000001",
-                root,
-                head(),
-                summary(),
-                vec![entry(b"a")],
-            )
-            .expect("install first change set");
-        let second = registry
-            .install(
-                "repository-0000000000000001",
-                root,
-                head(),
-                summary(),
-                vec![entry(b"b")],
-            )
-            .expect("replace change set");
+        let first = install_changes(
+            &registry,
+            "repository-0000000000000001",
+            root,
+            vec![entry(b"a")],
+        );
+        let second = install_changes(
+            &registry,
+            "repository-0000000000000001",
+            root,
+            vec![entry(b"b")],
+        );
         let first_file = first.files[0].file_id.0.clone();
         let second_file = second.files[0].file_id.0.clone();
-        let mut change_sets = registry.lock_change_sets().expect("lock change sets");
+        let mut state = registry.lock_state().expect("lock change sets");
 
         assert!(authorize_file(
-            &mut change_sets,
+            &mut state.change_sets,
             "repository-0000000000000001",
             root,
             &first.change_set_id.0,
@@ -433,7 +498,7 @@ mod tests {
         )
         .is_err());
         assert!(authorize_file(
-            &mut change_sets,
+            &mut state.change_sets,
             "repository-0000000000000002",
             root,
             &second.change_set_id.0,
@@ -442,7 +507,7 @@ mod tests {
         )
         .is_err());
         assert!(authorize_file(
-            &mut change_sets,
+            &mut state.change_sets,
             "repository-0000000000000001",
             Path::new("/tmp/orbit-change-set-b"),
             &second.change_set_id.0,
@@ -451,7 +516,7 @@ mod tests {
         )
         .is_err());
         assert!(authorize_file(
-            &mut change_sets,
+            &mut state.change_sets,
             "repository-0000000000000001",
             root,
             &second.change_set_id.0,
@@ -462,20 +527,166 @@ mod tests {
     }
 
     #[test]
+    fn older_completion_cannot_replace_a_newer_successful_refresh() {
+        let registry = ChangeSetRegistry::default();
+        let repository_id = "repository-0000000000000001";
+        let root = Path::new("/tmp/orbit-refresh-order");
+        let prior = install_changes(&registry, repository_id, root, vec![entry(b"prior")]);
+
+        let older = registry.reserve_refresh();
+        registry
+            .begin_refresh(repository_id, root, older)
+            .expect("begin older refresh");
+        let newer = registry.reserve_refresh();
+        registry
+            .begin_refresh(repository_id, root, newer)
+            .expect("begin newer refresh");
+        let newest = registry
+            .install(
+                repository_id,
+                root,
+                newer,
+                head(),
+                summary(),
+                vec![entry(b"newest")],
+            )
+            .expect("newer refresh succeeds first");
+
+        let superseded = registry
+            .install(
+                repository_id,
+                root,
+                older,
+                head(),
+                summary(),
+                vec![entry(b"older")],
+            )
+            .expect_err("older completion cannot install afterward");
+        assert_eq!(superseded.code, "changes_refresh_superseded");
+        registry
+            .authorize_for_test(
+                repository_id,
+                root,
+                newest.change_set_id.as_str(),
+                newest.files[0].file_id.as_str(),
+            )
+            .expect("newer change set remains authoritative");
+        assert!(registry
+            .authorize_for_test(
+                repository_id,
+                root,
+                prior.change_set_id.as_str(),
+                prior.files[0].file_id.as_str(),
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn newer_failed_refresh_preserves_prior_set_and_still_supersedes_older_work() {
+        let registry = ChangeSetRegistry::default();
+        let repository_id = "repository-0000000000000001";
+        let root = Path::new("/tmp/orbit-failed-refresh-order");
+        let prior = install_changes(&registry, repository_id, root, vec![entry(b"prior")]);
+
+        let older = registry.reserve_refresh();
+        registry
+            .begin_refresh(repository_id, root, older)
+            .expect("begin older refresh");
+        let newer = registry.reserve_refresh();
+        registry
+            .begin_refresh(repository_id, root, newer)
+            .expect("begin newer refresh that later fails");
+        // A status/capability failure never calls install for the newer request.
+        registry
+            .authorize_for_test(
+                repository_id,
+                root,
+                prior.change_set_id.as_str(),
+                prior.files[0].file_id.as_str(),
+            )
+            .expect("newer failure preserves the prior successful set");
+
+        let superseded = registry
+            .install(
+                repository_id,
+                root,
+                older,
+                head(),
+                summary(),
+                vec![entry(b"older")],
+            )
+            .expect_err("older completion stays superseded after newer failure");
+        assert_eq!(superseded.code, "changes_refresh_superseded");
+        registry
+            .authorize_for_test(
+                repository_id,
+                root,
+                prior.change_set_id.as_str(),
+                prior.files[0].file_id.as_str(),
+            )
+            .expect("prior set remains authoritative");
+    }
+
+    #[test]
+    fn delayed_authorization_cannot_reverse_reserved_request_order() {
+        let registry = ChangeSetRegistry::default();
+        let repository_id = "repository-0000000000000001";
+        let root = Path::new("/tmp/orbit-delayed-authorization");
+        let older = registry.reserve_refresh();
+        let newer = registry.reserve_refresh();
+
+        registry
+            .begin_refresh(repository_id, root, newer)
+            .expect("newer worker completes authorization first");
+        let superseded = registry
+            .begin_refresh(repository_id, root, older)
+            .expect_err("older authorization cannot take authority later");
+        assert_eq!(superseded.code, "changes_refresh_superseded");
+    }
+
+    #[test]
+    fn repository_invalidation_does_not_revive_an_older_in_flight_refresh() {
+        let registry = ChangeSetRegistry::default();
+        let repository_id = "repository-0000000000000001";
+        let root = Path::new("/tmp/orbit-invalidated-refresh");
+        let older = registry.reserve_refresh();
+        registry
+            .begin_refresh(repository_id, root, older)
+            .expect("begin older refresh");
+        let newer = registry.reserve_refresh();
+        registry
+            .begin_refresh(repository_id, root, newer)
+            .expect("begin newer refresh");
+
+        registry
+            .invalidate_repository(repository_id)
+            .expect("invalidate repository handles");
+        let superseded = registry
+            .install(
+                repository_id,
+                root,
+                older,
+                head(),
+                summary(),
+                vec![entry(b"older")],
+            )
+            .expect_err("invalidation must retain the newer generation floor");
+        assert_eq!(superseded.code, "changes_refresh_superseded");
+    }
+
+    #[test]
     fn expired_and_malformed_handles_are_unavailable() {
         let registry = ChangeSetRegistry::default();
         let root = Path::new("/tmp/orbit-change-set");
-        let changes = registry
-            .install(
-                "repository-0000000000000001",
-                root,
-                head(),
-                summary(),
-                vec![entry(b"a")],
-            )
-            .expect("install change set");
-        let mut change_sets = registry.lock_change_sets().expect("lock change sets");
-        let expired_at = change_sets
+        let changes = install_changes(
+            &registry,
+            "repository-0000000000000001",
+            root,
+            vec![entry(b"a")],
+        );
+        let mut state = registry.lock_state().expect("lock change sets");
+        let expired_at = state
+            .change_sets
             .get(&changes.change_set_id.0)
             .expect("stored change set")
             .last_access
@@ -483,7 +694,7 @@ mod tests {
             + Duration::from_secs(1);
 
         let error = authorize_file(
-            &mut change_sets,
+            &mut state.change_sets,
             "repository-0000000000000001",
             root,
             &changes.change_set_id.0,
@@ -493,7 +704,7 @@ mod tests {
         .expect_err("expired handle should fail");
         assert_eq!(error.code, "change_set_unavailable");
         assert!(authorize_file(
-            &mut change_sets,
+            &mut state.change_sets,
             "repository-0000000000000001",
             root,
             "bad",
@@ -510,15 +721,15 @@ mod tests {
         let mut first = None;
         for index in 0..=MAX_ACTIVE_CHANGE_SETS {
             let repository_id = format!("repository-{index:016x}");
-            let changes = registry
-                .install(&repository_id, root, head(), summary(), vec![entry(b"a")])
-                .expect("install bounded change set");
+            let changes = install_changes(&registry, &repository_id, root, vec![entry(b"a")]);
             if index == 0 {
                 first = Some(changes.change_set_id.0);
             }
         }
-        let change_sets = registry.lock_change_sets().expect("lock change sets");
-        assert_eq!(change_sets.len(), MAX_ACTIVE_CHANGE_SETS);
-        assert!(!change_sets.contains_key(&first.expect("first change set")));
+        let state = registry.lock_state().expect("lock change sets");
+        assert_eq!(state.change_sets.len(), MAX_ACTIVE_CHANGE_SETS);
+        assert!(!state
+            .change_sets
+            .contains_key(&first.expect("first change set")));
     }
 }

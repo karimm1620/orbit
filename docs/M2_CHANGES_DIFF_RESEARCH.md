@@ -319,6 +319,11 @@ change it deliberately with tests and documentation rather than silently removin
 `get_repository_changes` creates a point-in-time list and installs a new change set only after the
 status parse succeeds. A failed refresh leaves the prior displayed list intact but marks the error
 contextually. A successful refresh invalidates the prior repository change set and selected diff.
+Rust reserves a monotonic per-request generation before blocking repository/status work. The
+registry records request order independently of worker completion order and permits installation
+only for the latest generation of that repository; a superseded older completion cannot replace a
+newer result. A newer failed refresh still supersedes older in-flight work while preserving the
+last successfully installed change set when repository authorization remains valid.
 
 Before a diff read, Rust:
 
