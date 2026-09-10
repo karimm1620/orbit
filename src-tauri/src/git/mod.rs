@@ -1,8 +1,13 @@
+mod diff;
 mod graph;
 mod history;
 mod process;
 mod status;
 
+pub(crate) use diff::{read_file_diff, DiffSelection};
+#[cfg(test)]
+pub use diff::{DiffLineKind, DiffUnavailableReason, FileDiffContent};
+pub use diff::{DiffSide, FileDiff};
 #[cfg(test)]
 pub use graph::CommitRefKind;
 pub use graph::{

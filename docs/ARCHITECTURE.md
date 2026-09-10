@@ -545,8 +545,12 @@ idle, and are replaced only after a new status read succeeds. A monotonic Rust-o
 reserved before blocking repository/status work; only the latest generation for that repository
 may install. This prevents an older worker from invalidating a newer successful refresh when
 completion order differs from request order. Failed or superseded refreshes leave the prior valid
-change set intact when repository authorization remains valid. The typed diff operation and patch
-parser described below remain deferred to the next M2 slice.
+change set intact when repository authorization remains valid.
+
+The second M2 slice implements `get_file_diff` with the authorized repository/change-set/file tuple
+and a closed staged/unstaged side. It revalidates the root and fresh semantic status before one
+bounded acquisition, then returns typed text hunks or an explicit binary, conflict, submodule,
+too-large, or unavailable state. No raw patch or path authority crosses IPC.
 
 Staged patches use `git diff --cached`; unstaged patches use `git diff`. Untracked regular files and
 symlinks use a bounded Linux `git diff --no-index` comparison against `/dev/null`. All path
@@ -554,6 +558,10 @@ arguments are Rust-owned and follow `--`. One numstat-plus-patch response provid
 binary classification and unified patch data from the same Git invocation. Rust validates the
 numstat identity before a pure Rust patch parser produces typed hunks and lines. Patch header paths
 are never authoritative.
+
+Rename/copy reads supply both Rust-held paths. A facet-specific `--diff-filter=R` or
+`--diff-filter=C` is applied after Git's bounded detection so a modified copy source cannot add a
+second numstat/patch record to the selected-file response.
 
 Binary, conflicted, submodule, too-large, unsupported-encoding, special-file, timeout, stale, and
 unavailable results are explicit. Text patches must be valid UTF-8 initially; Orbit does not

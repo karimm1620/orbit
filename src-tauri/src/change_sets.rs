@@ -74,7 +74,7 @@ pub struct RepositoryChanges {
     pub files: Vec<ChangedFile>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct StoredFile {
     path: Vec<u8>,
     original_path: Option<Vec<u8>>,
@@ -82,6 +82,29 @@ struct StoredFile {
     unstaged: Option<ChangeFacet>,
     conflict: Option<ConflictKind>,
     submodule: Option<SubmoduleState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AuthorizedFile {
+    pub path: Vec<u8>,
+    pub original_path: Option<Vec<u8>>,
+    pub staged: Option<ChangeFacet>,
+    pub unstaged: Option<ChangeFacet>,
+    pub conflict: Option<ConflictKind>,
+    pub submodule: Option<SubmoduleState>,
+}
+
+impl From<&StoredFile> for AuthorizedFile {
+    fn from(file: &StoredFile) -> Self {
+        Self {
+            path: file.path.clone(),
+            original_path: file.original_path.clone(),
+            staged: file.staged.clone(),
+            unstaged: file.unstaged.clone(),
+            conflict: file.conflict,
+            submodule: file.submodule,
+        }
+    }
 }
 
 impl From<StatusEntry> for StoredFile {
@@ -266,6 +289,25 @@ impl ChangeSetRegistry {
             .change_sets
             .retain(|_, change_set| change_set.repository_id != repository_id);
         Ok(())
+    }
+
+    pub(crate) fn authorize_file(
+        &self,
+        repository_id: &str,
+        root: &Path,
+        change_set_id: &str,
+        file_id: &str,
+    ) -> Result<AuthorizedFile, OrbitError> {
+        let mut state = self.lock_state()?;
+        authorize_file(
+            &mut state.change_sets,
+            repository_id,
+            root,
+            change_set_id,
+            file_id,
+            Instant::now(),
+        )
+        .map(AuthorizedFile::from)
     }
 
     #[cfg(test)]

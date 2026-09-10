@@ -140,16 +140,7 @@ fn status_arguments(
         OsString::from("-c"),
         OsString::from("diff.renameLimit=1000"),
     ]);
-    for driver in filter_drivers {
-        args.extend([
-            OsString::from("-c"),
-            OsString::from(format!("filter.{driver}.clean=")),
-            OsString::from("-c"),
-            OsString::from(format!("filter.{driver}.process=")),
-            OsString::from("-c"),
-            OsString::from(format!("filter.{driver}.required=false")),
-        ]);
-    }
+    append_filter_driver_overrides(&mut args, filter_drivers);
     args.push(OsString::from("--no-pager"));
     if require_no_lazy_fetch {
         args.push(OsString::from("--no-lazy-fetch"));
@@ -170,7 +161,23 @@ fn status_arguments(
     args
 }
 
-fn configured_filter_drivers(
+pub(crate) fn append_filter_driver_overrides(
+    args: &mut Vec<OsString>,
+    filter_drivers: &BTreeSet<String>,
+) {
+    for driver in filter_drivers {
+        args.extend([
+            OsString::from("-c"),
+            OsString::from(format!("filter.{driver}.clean=")),
+            OsString::from("-c"),
+            OsString::from(format!("filter.{driver}.process=")),
+            OsString::from("-c"),
+            OsString::from(format!("filter.{driver}.required=false")),
+        ]);
+    }
+}
+
+pub(crate) fn configured_filter_drivers(
     runner: &GitRunner,
     root: &Path,
 ) -> Result<BTreeSet<String>, OrbitError> {

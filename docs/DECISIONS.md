@@ -518,6 +518,11 @@ numstat identity exactly matches the Rust-held entry, use `-\t-` for binary clas
 parse text hunks in Rust. Do not use patch-header filenames as identity or send raw patch output to
 React.
 
+For rename/copy facets, pass the Rust-held origin and target together and constrain the resulting
+record with the corresponding closed `--diff-filter=R` or `--diff-filter=C`. This preserves Git's
+relationship detection without allowing a changed copy source to become an unexpected second file
+in the selected response.
+
 Return binary, conflict, submodule, too-large, unsupported-encoding, special-file, timeout, stale,
 and unavailable results as typed states. Combined conflict patches, binary previews, and lossy
 text decoding are not part of initial M2.

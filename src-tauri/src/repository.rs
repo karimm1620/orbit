@@ -11,11 +11,11 @@ use std::{
 use serde::Serialize;
 
 use crate::{
-    change_sets::{ChangeSetRegistry, RepositoryChanges},
+    change_sets::{AuthorizedFile, ChangeSetRegistry, RepositoryChanges},
     error::OrbitError,
     git::{
-        read_detailed_status, read_recent_commits, read_status, CommitSummary, GitRunner,
-        HeadSnapshot, WorkingTreeSnapshot,
+        read_detailed_status, read_file_diff, read_recent_commits, read_status, CommitSummary,
+        DiffSelection, DiffSide, FileDiff, GitRunner, HeadSnapshot, WorkingTreeSnapshot,
     },
     history_sessions::{CommitHistoryPage, CommitHistoryRegistry},
 };
@@ -120,6 +120,29 @@ impl RepositoryRegistry {
         )
     }
 
+    pub fn file_diff(
+        &self,
+        repository_id: &str,
+        change_set_id: &str,
+        file_id: &str,
+        side: DiffSide,
+    ) -> Result<FileDiff, OrbitError> {
+        let root = self.authorized_root(repository_id)?;
+        let file = self
+            .changes
+            .authorize_file(repository_id, &root, change_set_id, file_id)?;
+        let status = read_detailed_status(&self.runner, &root)?;
+        read_file_diff(
+            &self.runner,
+            &root,
+            &diff_selection(file),
+            &status.changes,
+            change_set_id,
+            file_id,
+            side,
+        )
+    }
+
     fn authorized_root(&self, repository_id: &str) -> Result<PathBuf, OrbitError> {
         let root = self.registered_root(repository_id)?;
         self.revalidate_root(repository_id, &root)?;
@@ -180,6 +203,17 @@ impl RepositoryRegistry {
     fn next_repository_id(&self) -> String {
         let value = self.next_id.fetch_add(1, Ordering::Relaxed);
         format!("repository-{value:016x}")
+    }
+}
+
+fn diff_selection(file: AuthorizedFile) -> DiffSelection {
+    DiffSelection {
+        path: file.path,
+        original_path: file.original_path,
+        staged: file.staged,
+        unstaged: file.unstaged,
+        conflict: file.conflict,
+        submodule: file.submodule,
     }
 }
 
@@ -315,7 +349,8 @@ mod tests {
 
     use crate::git::{
         history_starting_tips, read_graph_commit_page, read_graph_order, read_object_format,
-        ChangeKind, CommitHistoryHead, CommitRefKind, ConflictKind,
+        ChangeKind, CommitHistoryHead, CommitRefKind, ConflictKind, DiffLineKind,
+        DiffUnavailableReason, FileDiffContent,
     };
     use crate::history_sessions::MAX_HISTORY_SESSION_COMMITS;
 
@@ -1622,5 +1657,599 @@ mod tests {
                 &file_id,
             )
             .expect("failed refresh leaves old handles authorized");
+    }
+
+    #[test]
+    fn selected_diff_reads_staged_and_unstaged_sides_independently() {
+        let repository = TestRepository::new();
+        repository.commit_file("both.txt", "base\n", "Base");
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open repository");
+
+        repository.write("both.txt", "staged\n");
+        repository.git_ok(["add", "--", "both.txt"]);
+        repository.write("both.txt", "worktree\n");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("read changes");
+        let file = changes
+            .files
+            .iter()
+            .find(|file| file.path.text == "both.txt")
+            .expect("both-sided entry");
+
+        let staged = registry
+            .file_diff(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                file.file_id.as_str(),
+                DiffSide::Staged,
+            )
+            .expect("staged diff");
+        let unstaged = registry
+            .file_diff(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                file.file_id.as_str(),
+                DiffSide::Unstaged,
+            )
+            .expect("unstaged diff");
+
+        let FileDiffContent::Text { hunks, .. } = staged.content else {
+            panic!("staged side should be text");
+        };
+        assert!(hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .any(|line| { line.kind == DiffLineKind::Addition && line.content == "staged" }));
+        let FileDiffContent::Text { hunks, .. } = unstaged.content else {
+            panic!("unstaged side should be text");
+        };
+        assert!(hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .any(|line| { line.kind == DiffLineKind::Addition && line.content == "worktree" }));
+    }
+
+    #[test]
+    fn selected_diff_reads_staged_add_delete_and_unborn_add() {
+        let repository = TestRepository::new();
+        repository.commit_file("deleted.txt", "delete me\n", "Base");
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open repository");
+        fs::remove_file(repository.root.join("deleted.txt")).expect("delete tracked file");
+        repository.write("added.txt", "new\n");
+        repository.git_ok(["add", "--all"]);
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("read staged changes");
+
+        for path in ["added.txt", "deleted.txt"] {
+            let file = changes
+                .files
+                .iter()
+                .find(|file| file.path.text == path)
+                .expect("staged entry");
+            let diff = registry
+                .file_diff(
+                    &opened.repository_id,
+                    changes.change_set_id.as_str(),
+                    file.file_id.as_str(),
+                    DiffSide::Staged,
+                )
+                .expect("staged diff");
+            assert!(matches!(diff.content, FileDiffContent::Text { .. }));
+        }
+
+        let unborn_repository = TestRepository::new();
+        unborn_repository.write("first.txt", "first\n");
+        unborn_repository.git_ok(["add", "--", "first.txt"]);
+        let unborn_registry = RepositoryRegistry::default();
+        let unborn = unborn_registry
+            .open(unborn_repository.root.clone())
+            .expect("open unborn repository");
+        let changes = unborn_registry
+            .repository_changes(&unborn.repository_id)
+            .expect("read unborn changes");
+        let diff = unborn_registry
+            .file_diff(
+                &unborn.repository_id,
+                changes.change_set_id.as_str(),
+                changes.files[0].file_id.as_str(),
+                DiffSide::Staged,
+            )
+            .expect("unborn staged diff");
+        assert!(matches!(diff.content, FileDiffContent::Text { .. }));
+    }
+
+    #[test]
+    fn selected_diff_reads_unstaged_delete_and_staged_rename_and_copy() {
+        let deleted_repository = TestRepository::new();
+        deleted_repository.commit_file("gone.txt", "gone\n", "Base");
+        let deleted_registry = RepositoryRegistry::default();
+        let deleted = deleted_registry
+            .open(deleted_repository.root.clone())
+            .expect("open delete repository");
+        fs::remove_file(deleted_repository.root.join("gone.txt")).expect("delete tracked file");
+        let changes = deleted_registry
+            .repository_changes(&deleted.repository_id)
+            .expect("read deletion");
+        let diff = deleted_registry
+            .file_diff(
+                &deleted.repository_id,
+                changes.change_set_id.as_str(),
+                changes.files[0].file_id.as_str(),
+                DiffSide::Unstaged,
+            )
+            .expect("unstaged deletion diff");
+        assert!(matches!(diff.content, FileDiffContent::Text { .. }));
+
+        let movement_repository = TestRepository::new();
+        movement_repository.commit_file("old.txt", "same\n", "Base");
+        let movement_registry = RepositoryRegistry::default();
+        let movement = movement_registry
+            .open(movement_repository.root.clone())
+            .expect("open movement repository");
+        movement_repository.git_ok(["mv", "old.txt", "renamed.txt"]);
+        let changes = movement_registry
+            .repository_changes(&movement.repository_id)
+            .expect("read rename");
+        let renamed = changes
+            .files
+            .iter()
+            .find(|file| file.path.text == "renamed.txt")
+            .expect("rename entry");
+        let diff = movement_registry
+            .file_diff(
+                &movement.repository_id,
+                changes.change_set_id.as_str(),
+                renamed.file_id.as_str(),
+                DiffSide::Staged,
+            )
+            .expect("rename diff");
+        let FileDiffContent::Text { metadata, .. } = diff.content else {
+            panic!("rename should be text metadata");
+        };
+        assert!(metadata.renamed);
+
+        let copy_repository = TestRepository::new();
+        copy_repository.commit_file("source.txt", "base\n", "Copy source");
+        let copy_registry = RepositoryRegistry::default();
+        let copy_opened = copy_registry
+            .open(copy_repository.root.clone())
+            .expect("open copy repository");
+        copy_repository.write("source.txt", "base\nnew\n");
+        copy_repository.write("copy.txt", "base\nnew\n");
+        copy_repository.git_ok(["add", "--", "source.txt", "copy.txt"]);
+        let changes = copy_registry
+            .repository_changes(&copy_opened.repository_id)
+            .expect("read copy");
+        let copied = changes
+            .files
+            .iter()
+            .find(|file| file.path.text == "copy.txt")
+            .expect("copy entry");
+        assert_eq!(
+            copied.staged.as_ref().map(|facet| facet.kind),
+            Some(ChangeKind::Copied)
+        );
+        let diff = copy_registry
+            .file_diff(
+                &copy_opened.repository_id,
+                changes.change_set_id.as_str(),
+                copied.file_id.as_str(),
+                DiffSide::Staged,
+            )
+            .expect("copy diff");
+        let FileDiffContent::Text { metadata, .. } = diff.content else {
+            panic!("copy should be text metadata");
+        };
+        assert!(metadata.copied, "copy metadata: {metadata:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selected_diff_handles_untracked_unusual_paths_and_symlinks() {
+        use std::{
+            ffi::OsString,
+            os::unix::{ffi::OsStringExt, fs::symlink},
+        };
+
+        let repository = TestRepository::new();
+        repository.commit_file("base.txt", "base\n", "Base");
+        repository.write("-leading\tline\n文件.txt", "odd\n");
+        fs::write(
+            repository
+                .root
+                .join(OsString::from_vec(b"invalid-\xff.txt".to_vec())),
+            b"invalid path\n",
+        )
+        .expect("write invalid-byte path");
+        symlink("/etc/passwd", repository.root.join("link")).expect("create untracked symlink");
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open repository");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("read unusual changes");
+
+        for display in ["-leading\\tline\\n文件.txt", "invalid-\\xFF.txt", "link"] {
+            let file = changes
+                .files
+                .iter()
+                .find(|file| file.path.text == display)
+                .expect("unusual entry");
+            let diff = registry
+                .file_diff(
+                    &opened.repository_id,
+                    changes.change_set_id.as_str(),
+                    file.file_id.as_str(),
+                    DiffSide::Unstaged,
+                )
+                .expect("untracked diff");
+            if display == "link" {
+                let FileDiffContent::Text { hunks, .. } = diff.content else {
+                    panic!("symlink should be represented as text");
+                };
+                let additions = hunks
+                    .iter()
+                    .flat_map(|hunk| &hunk.lines)
+                    .filter(|line| line.kind == DiffLineKind::Addition)
+                    .map(|line| line.content.as_str())
+                    .collect::<Vec<_>>();
+                assert_eq!(additions, ["/etc/passwd"]);
+            } else {
+                assert!(matches!(diff.content, FileDiffContent::Text { .. }));
+            }
+        }
+
+        let leading = changes
+            .files
+            .iter()
+            .find(|file| file.path.text == "-leading\\tline\\n文件.txt")
+            .expect("leading-dash entry");
+        let unavailable = registry
+            .file_diff(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                leading.file_id.as_str(),
+                DiffSide::Staged,
+            )
+            .expect("closed-side response");
+        assert_eq!(
+            unavailable.content,
+            FileDiffContent::Unavailable {
+                reason: DiffUnavailableReason::SideUnavailable
+            }
+        );
+    }
+
+    #[test]
+    fn selected_diff_classifies_binary_and_unsupported_text_encoding() {
+        let binary_repository = TestRepository::new();
+        binary_repository.commit_file("binary.dat", "base\n", "Base");
+        fs::write(binary_repository.root.join("binary.dat"), b"next\0bytes")
+            .expect("write binary file");
+        let binary_registry = RepositoryRegistry::default();
+        let opened = binary_registry
+            .open(binary_repository.root.clone())
+            .expect("open binary repository");
+        let changes = binary_registry
+            .repository_changes(&opened.repository_id)
+            .expect("read binary change");
+        let diff = binary_registry
+            .file_diff(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                changes.files[0].file_id.as_str(),
+                DiffSide::Unstaged,
+            )
+            .expect("binary diff");
+        assert_eq!(diff.content, FileDiffContent::Binary);
+
+        let encoding_repository = TestRepository::new();
+        encoding_repository.commit_file("text.txt", "base\n", "Base");
+        fs::write(encoding_repository.root.join("text.txt"), b"invalid \xff\n")
+            .expect("write invalid UTF-8 text");
+        let encoding_registry = RepositoryRegistry::default();
+        let opened = encoding_registry
+            .open(encoding_repository.root.clone())
+            .expect("open encoding repository");
+        let changes = encoding_registry
+            .repository_changes(&opened.repository_id)
+            .expect("read encoding change");
+        let diff = encoding_registry
+            .file_diff(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                changes.files[0].file_id.as_str(),
+                DiffSide::Unstaged,
+            )
+            .expect("unsupported encoding response");
+        assert_eq!(
+            diff.content,
+            FileDiffContent::Unavailable {
+                reason: DiffUnavailableReason::UnsupportedEncoding
+            }
+        );
+    }
+
+    #[test]
+    fn selected_diff_returns_a_typed_too_large_state() {
+        let repository = TestRepository::new();
+        repository.commit_file("large.txt", "base\n", "Base");
+        fs::write(
+            repository.root.join("large.txt"),
+            vec![b'x'; 5 * 1024 * 1024],
+        )
+        .expect("write oversized text diff");
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open large repository");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("read large change");
+        let diff = registry
+            .file_diff(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                changes.files[0].file_id.as_str(),
+                DiffSide::Unstaged,
+            )
+            .expect("large diff response");
+
+        assert_eq!(diff.content, FileDiffContent::TooLarge);
+    }
+
+    #[test]
+    fn selected_diff_returns_conflict_submodule_and_stale_states() {
+        let conflict_repository = TestRepository::new();
+        conflict_repository.commit_file("conflict.txt", "base\n", "Base");
+        conflict_repository.git_ok(["checkout", "-b", "feature"]);
+        conflict_repository.commit_file("conflict.txt", "feature\n", "Feature");
+        conflict_repository.git_ok(["checkout", "main"]);
+        conflict_repository.commit_file("conflict.txt", "main\n", "Main");
+        conflict_repository.git_failure(["merge", "feature"]);
+        let conflict_registry = RepositoryRegistry::default();
+        let opened = conflict_registry
+            .open(conflict_repository.root.clone())
+            .expect("open conflicted repository");
+        let changes = conflict_registry
+            .repository_changes(&opened.repository_id)
+            .expect("read conflict");
+        let diff = conflict_registry
+            .file_diff(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                changes.files[0].file_id.as_str(),
+                DiffSide::Unstaged,
+            )
+            .expect("conflict response");
+        assert!(matches!(diff.content, FileDiffContent::Conflict { .. }));
+
+        let submodule_repository = TestRepository::new();
+        submodule_repository.commit_file("base.txt", "base\n", "Base");
+        let gitlink_oid = submodule_repository.oid("HEAD");
+        submodule_repository.git_ok([
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{gitlink_oid},nested"),
+        ]);
+        let submodule_registry = RepositoryRegistry::default();
+        let opened = submodule_registry
+            .open(submodule_repository.root.clone())
+            .expect("open gitlink repository");
+        let changes = submodule_registry
+            .repository_changes(&opened.repository_id)
+            .expect("read gitlink");
+        let nested = changes
+            .files
+            .iter()
+            .find(|file| file.path.text == "nested")
+            .expect("gitlink entry");
+        let diff = submodule_registry
+            .file_diff(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                nested.file_id.as_str(),
+                DiffSide::Staged,
+            )
+            .expect("submodule response");
+        assert!(matches!(diff.content, FileDiffContent::Submodule { .. }));
+
+        let stale_repository = TestRepository::new();
+        stale_repository.commit_file("tracked.txt", "base\n", "Base");
+        stale_repository.write("tracked.txt", "changed\n");
+        let stale_registry = RepositoryRegistry::default();
+        let opened = stale_registry
+            .open(stale_repository.root.clone())
+            .expect("open stale repository");
+        let changes = stale_registry
+            .repository_changes(&opened.repository_id)
+            .expect("read stale fixture");
+        stale_repository.write("tracked.txt", "base\n");
+        let diff = stale_registry
+            .file_diff(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                changes.files[0].file_id.as_str(),
+                DiffSide::Unstaged,
+            )
+            .expect("stale response");
+        assert_eq!(
+            diff.content,
+            FileDiffContent::Unavailable {
+                reason: DiffUnavailableReason::Stale
+            }
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selected_diff_does_not_execute_filter_textconv_external_diff_or_fsmonitor() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let repository = TestRepository::new();
+        repository.write(
+            ".gitattributes",
+            "tracked.txt filter=orbit-filter diff=orbit-textconv\n",
+        );
+        repository.write("tracked.txt", "base\n");
+        repository.git_ok(["add", "--", ".gitattributes", "tracked.txt"]);
+        repository.git_ok(["commit", "-m", "Base"]);
+
+        let filter_marker = repository.root.join("filter-ran");
+        let textconv_marker = repository.root.join("textconv-ran");
+        let external_marker = repository.root.join("external-diff-ran");
+        let fsmonitor_marker = repository.root.join("fsmonitor-ran");
+        for (name, marker) in [
+            ("filter-helper", &filter_marker),
+            ("textconv-helper", &textconv_marker),
+            ("external-helper", &external_marker),
+            ("fsmonitor-helper", &fsmonitor_marker),
+        ] {
+            let helper = repository.root.join(name);
+            repository.write(
+                name,
+                &format!("#!/bin/sh\n: > '{}'\nexit 0\n", marker.display()),
+            );
+            let mut permissions = fs::metadata(&helper)
+                .expect("helper metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(helper, permissions).expect("make helper executable");
+        }
+        let filter = repository.root.join("filter-helper");
+        let textconv = repository.root.join("textconv-helper");
+        let external = repository.root.join("external-helper");
+        let fsmonitor = repository.root.join("fsmonitor-helper");
+        repository.git_ok([
+            "config",
+            "filter.orbit-filter.clean",
+            filter.to_str().expect("UTF-8 helper path"),
+        ]);
+        repository.git_ok([
+            "config",
+            "filter.orbit-filter.process",
+            filter.to_str().expect("UTF-8 helper path"),
+        ]);
+        repository.git_ok(["config", "filter.orbit-filter.required", "true"]);
+        repository.git_ok([
+            "config",
+            "diff.orbit-textconv.textconv",
+            textconv.to_str().expect("UTF-8 helper path"),
+        ]);
+        repository.git_ok([
+            "config",
+            "diff.external",
+            external.to_str().expect("UTF-8 helper path"),
+        ]);
+        repository.git_ok([
+            "config",
+            "core.fsmonitor",
+            fsmonitor.to_str().expect("UTF-8 helper path"),
+        ]);
+        repository.write("tracked.txt", "changed\n");
+
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open protected repository");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("read protected changes");
+        let tracked = changes
+            .files
+            .iter()
+            .find(|file| file.path.text == "tracked.txt")
+            .expect("tracked change");
+        let diff = registry
+            .file_diff(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                tracked.file_id.as_str(),
+                DiffSide::Unstaged,
+            )
+            .expect("read protected diff");
+        assert!(matches!(diff.content, FileDiffContent::Text { .. }));
+        for marker in [
+            filter_marker,
+            textconv_marker,
+            external_marker,
+            fsmonitor_marker,
+        ] {
+            assert!(!marker.exists(), "configured helper must not execute");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selected_diff_does_not_lazy_fetch_a_missing_promised_blob() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let repository = TestRepository::new();
+        repository.commit_file("tracked.txt", "base\n", "Base");
+        let blob_oid = repository.git_output(["rev-parse", "HEAD:tracked.txt"]);
+        let object_path = repository
+            .root
+            .join(".git/objects")
+            .join(&blob_oid[..2])
+            .join(&blob_oid[2..]);
+        assert!(object_path.is_file(), "fixture blob should be loose");
+
+        let marker = repository.root.join("diff-lazy-fetch-ran");
+        let remote = repository.root.join("fake-diff-promisor-remote");
+        repository.write(
+            "fake-diff-promisor-remote",
+            &format!("#!/bin/sh\n: > '{}'\nexit 1\n", marker.display()),
+        );
+        let mut permissions = fs::metadata(&remote)
+            .expect("remote metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&remote, permissions).expect("make remote executable");
+        repository.git_ok(["config", "core.repositoryformatversion", "1"]);
+        repository.git_ok(["config", "extensions.partialClone", "origin"]);
+        repository.git_ok(["config", "remote.origin.promisor", "true"]);
+        repository.git_ok(["config", "remote.origin.partialclonefilter", "blob:none"]);
+        repository.git_ok([
+            "config",
+            "remote.origin.url",
+            &format!("ext::{}", remote.display()),
+        ]);
+        repository.git_ok(["config", "protocol.ext.allow", "always"]);
+        fs::remove_file(&object_path).expect("remove promised blob");
+        repository.write("tracked.txt", "changed\n");
+
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open partial-clone fixture");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("read changes without fetching blob");
+        let tracked = changes
+            .files
+            .iter()
+            .find(|file| file.path.text == "tracked.txt")
+            .expect("tracked change");
+        let error = registry
+            .file_diff(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                tracked.file_id.as_str(),
+                DiffSide::Unstaged,
+            )
+            .expect_err("missing blob should fail closed");
+
+        assert_eq!(error.code, "git_command_failed");
+        assert!(!marker.exists(), "promisor remote must not execute");
     }
 }

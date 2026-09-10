@@ -37,15 +37,15 @@
 
 ## 2. Diff acquisition and parser
 
-- [ ] Extend `GitRunner` with a bounded M2 deadline without adding another process boundary.
-- [ ] Add hardened staged and unstaged selected-file diff operations.
-- [ ] Add the bounded Linux no-index path for untracked regular files and symlinks.
-- [ ] Revalidate change-set/file/side identity and worktree file type before acquisition.
-- [ ] Parse and validate the combined NUL numstat prefix plus patch transition.
-- [ ] Classify binary output from numstat rather than patch prose.
-- [ ] Parse bounded unified hunks and lines in pure Rust without trusting patch-header paths.
-- [ ] Return typed text, binary, conflict, submodule, too-large, unsupported-encoding, timeout, stale, and unavailable states.
-- [ ] Keep combined conflict patches, binary previews, and non-UTF-8 decoding out of the initial viewer.
+- [x] Extend `GitRunner` with a bounded M2 deadline without adding another process boundary.
+- [x] Add hardened staged and unstaged selected-file diff operations.
+- [x] Add the bounded Linux no-index path for untracked regular files and symlinks.
+- [x] Revalidate change-set/file/side identity and worktree file type before acquisition.
+- [x] Parse and validate the combined NUL numstat prefix plus patch transition.
+- [x] Classify binary output from numstat rather than patch prose.
+- [x] Parse bounded unified hunks and lines in pure Rust without trusting patch-header paths.
+- [x] Return typed text, binary, conflict, submodule, too-large, unsupported-encoding, timeout, stale, and unavailable states.
+- [x] Keep combined conflict patches, binary previews, and non-UTF-8 decoding out of the initial viewer.
 
 ---
 
@@ -66,12 +66,13 @@
 ## 4. M2 tests and security gate
 
 - [ ] Cover every supported porcelain record/XY form, bounds, malformed output, and raw path cases.
-- [ ] Cover unified hunk parsing, line accounting, metadata-only changes, no-newline markers, invalid UTF-8, and bounds.
-- [ ] Cover real staged, unstaged, both-sided, add/delete, rename/copy, unborn, untracked, conflict, binary, symlink, and special-file repositories.
+- [x] Cover unified hunk parsing, line accounting, metadata-only changes, no-newline markers, invalid UTF-8, and bounds.
+- [x] Cover real staged, unstaged, both-sided, add/delete, rename/copy, unborn, untracked, conflict, binary, and symlink repositories plus direct special-file/FIFO rejection.
 - [ ] Prove M2 reads do not execute content filters, textconv, external diff, pager, fsmonitor, hooks, or promisor remotes.
-- [ ] Prove special-file/replacement races cannot leave a Git child running indefinitely.
+- [x] Verify the M2 deadline terminates and reaps a deliberately stalled child.
+- [ ] Prove special-file replacement races cannot leave a Git child running indefinitely.
 - [ ] Cover successful refresh replacement, failed-refresh preservation, stale file handles, and stale frontend responses.
-- [ ] Confirm no generic Git/process/filesystem IPC and no Tauri capability expansion.
+- [x] Confirm no generic Git/process/filesystem IPC and no Tauri capability expansion.
 - [ ] Run the complete frontend and Rust gate plus the Tauri debug build before the M2 PR.
 - [ ] Perform a real-repository desktop smoke when the environment can drive the native picker.
 

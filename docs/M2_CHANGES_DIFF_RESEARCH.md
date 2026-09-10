@@ -6,8 +6,9 @@
 
 **Evidence environment:** Linux 7.2.2 x86_64, native Git 2.55.0
 
-This document records the Git experiments and architecture decisions that must guide M2. It does
-not describe production M2 code; that implementation has not started.
+This document records the Git experiments and architecture decisions that guide M2. The detailed
+changes service and selected-file diff/parser slices now implement this accepted model; the UI and
+all mutations remain pending.
 
 ---
 
@@ -190,6 +191,11 @@ For rename/copy facets, Rust supplies the stored origin and target paths so Git 
 relationship. Other facets use the stored primary path. Detection options are explicit and
 bounded. `--cached` is used directly for unborn repositories; the experiment confirmed that Git
 compares the index against the empty side without a frontend-provided empty-tree OID.
+
+Implementation evidence refined the relationship command without changing the model: when a copy
+source is itself modified, passing both paths can otherwise emit the selected copy plus a second
+source patch. Orbit therefore adds the closed facet-specific `--diff-filter=C` (or `R` for a rename)
+after bounded detection. The result remains exactly one origin/target numstat record for validation.
 
 Each selected tracked diff uses one bounded invocation with this effective output policy:
 

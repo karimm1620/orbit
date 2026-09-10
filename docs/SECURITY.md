@@ -221,9 +221,11 @@ and are installed only after the full status result succeeds; a successful refre
 prior set for that repository. The WebView cannot submit a path, revision, pathspec, format, or Git
 argument.
 
-The accepted `get_file_diff`-style operation remains pending. Its future request contains the
-authorized repository ID, change-set/file IDs, and a closed staged/unstaged side, and Rust must
-reauthorize the repository/root and handle binding before every read.
+The implemented `get_file_diff` operation contains only the authorized repository ID,
+change-set/file IDs, and a closed staged/unstaged side. Rust reauthorizes the repository/root,
+resolves byte-exact paths from the bounded change-set registry, and compares a fresh hardened status
+record before every read. React cannot provide a path, revision, object expression, pathspec, or Git
+option.
 
 Detailed status reuses M0's content-filter discovery/neutralization and `core.fsmonitor=false`, and
 adds the M1 fail-closed `--no-lazy-fetch` requirement. M2 diff commands must additionally set all of
@@ -247,9 +249,10 @@ falling back to a potentially networked read.
 Untracked files use a purpose-specific, bounded Linux no-index comparison against `/dev/null`; this
 does not grant general file reading. Rust uses non-following metadata to reject directories and
 special files. Because a file can be replaced after validation and an untracked FIFO made Git block
-in a controlled test, M2 reads also require a 30-second deadline implemented inside the existing
-`GitRunner`, with child termination and bounded pipe draining. This extends the one process boundary
-rather than creating another one.
+in a controlled test, each selected diff invocation uses a 30-second deadline implemented inside
+the existing `GitRunner`, with child termination, reaping, and bounded pipe draining. Operations
+that do not opt into the M2 deadline retain their prior runner behavior. This extends the one
+process boundary rather than creating another one.
 
 Status paths are parsed as raw bytes. React sees only escaped display text and opaque file handles.
 Patch-header paths never establish identity. Rust validates a machine-framed numstat prefix before

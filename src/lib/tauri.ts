@@ -141,6 +141,65 @@ export type RepositoryChanges = {
   files: ChangedFile[];
 };
 
+export type DiffSide = "staged" | "unstaged";
+
+export type DiffUnavailableReason =
+  | "stale"
+  | "sideUnavailable"
+  | "missingFile"
+  | "unreadableFile"
+  | "specialFile"
+  | "unsupportedEncoding"
+  | "timeout";
+
+export type DiffMetadata = {
+  oldMode: string | null;
+  newMode: string | null;
+  newFile: boolean;
+  deletedFile: boolean;
+  renamed: boolean;
+  copied: boolean;
+  similarity: number | null;
+};
+
+export type DiffLine = {
+  kind: "context" | "addition" | "deletion";
+  oldLine: number | null;
+  newLine: number | null;
+  content: string;
+  noNewlineAtEnd: boolean;
+};
+
+export type DiffHunk = {
+  oldStart: number;
+  oldCount: number;
+  newStart: number;
+  newCount: number;
+  heading: string | null;
+  lines: DiffLine[];
+};
+
+export type FileDiffContent =
+  | {
+      state: "text";
+      additions: number;
+      deletions: number;
+      metadata: DiffMetadata;
+      hunks: DiffHunk[];
+    }
+  | { state: "binary" }
+  | { state: "conflict"; kind: ConflictKind }
+  | { state: "submodule"; submodule: NonNullable<ChangedFile["submodule"]> }
+  | { state: "tooLarge" }
+  | { state: "unavailable"; reason: DiffUnavailableReason };
+
+export type FileDiff = {
+  changeSetId: ChangeSetId;
+  fileId: FileId;
+  side: DiffSide;
+  content: FileDiffContent;
+};
+
 export function selectRepository(): Promise<RepositorySnapshot | null> {
   return invoke<RepositorySnapshot | null>("select_repository");
 }
@@ -157,6 +216,20 @@ export function getRepositoryChanges(
   repositoryId: RepositoryId,
 ): Promise<RepositoryChanges> {
   return invoke<RepositoryChanges>("get_repository_changes", { repositoryId });
+}
+
+export function getFileDiff(
+  repositoryId: RepositoryId,
+  changeSetId: ChangeSetId,
+  fileId: FileId,
+  side: DiffSide,
+): Promise<FileDiff> {
+  return invoke<FileDiff>("get_file_diff", {
+    repositoryId,
+    changeSetId,
+    fileId,
+    side,
+  });
 }
 
 export function getCommitHistoryPage(

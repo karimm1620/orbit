@@ -18,6 +18,7 @@ pub fn run() {
             commands::select_repository,
             commands::get_repository_snapshot,
             commands::get_repository_changes,
+            commands::get_file_diff,
             commands::get_commit_history_page
         ])
         .run(tauri::generate_context!())
