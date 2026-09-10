@@ -9,6 +9,7 @@ import {
   createEmptyChangesState,
   failChangesRefresh,
   groupChanges,
+  workingTreeForChanges,
 } from "./changesState";
 import type { ChangedFile, FileDiff, OrbitError, RepositoryChanges } from "./tauri";
 
@@ -48,6 +49,12 @@ function changes(id: string, files: ChangedFile[]): RepositoryChanges {
     summary: { staged: 0, unstaged: 0, untracked: 0, conflicted: 0, clean: false },
     files,
   };
+}
+
+const snapshotSummary = { staged: 8, unstaged: 7, untracked: 6, conflicted: 5, clean: false };
+
+function summary(staged: number, unstaged: number, untracked: number, conflicted: number) {
+  return { staged, unstaged, untracked, conflicted, clean: staged + unstaged + untracked + conflicted === 0 };
 }
 
 function diff(changeSetId: string, fileId: string, side: "staged" | "unstaged"): FileDiff {
@@ -95,6 +102,14 @@ describe("changes state", () => {
     expect(completed.diff.data).toBeNull();
   });
 
+  it("uses the accepted detailed status summary when it differs from the repository snapshot", () => {
+    const detailed = changes("change-set-one", [file("first")]);
+    detailed.summary = summary(1, 2, 3, 4);
+    const state = completeChangesRefresh(beginChangesRefresh(createEmptyChangesState(), 1), 1, detailed);
+
+    expect(workingTreeForChanges(state, snapshotSummary)).toEqual(detailed.summary);
+  });
+
   it("keeps the prior valid list when its newest refresh fails", () => {
     const existing = changes("change-set-one", [file("first")]);
     const state = completeChangesRefresh(beginChangesRefresh(createEmptyChangesState(), 1), 1, existing);
@@ -102,6 +117,21 @@ describe("changes state", () => {
 
     expect(failed.data).toBe(existing);
     expect(failed.error).toBe(error);
+    expect(workingTreeForChanges(failed, snapshotSummary)).toEqual(existing.summary);
+  });
+
+  it("does not let a stale refresh replace the accepted summary", () => {
+    const accepted = changes("change-set-one", [file("first")]);
+    accepted.summary = summary(2, 0, 0, 0);
+    const newer = changes("change-set-two", [file("second")]);
+    newer.summary = summary(0, 3, 0, 0);
+    let state = completeChangesRefresh(beginChangesRefresh(createEmptyChangesState(), 1), 1, accepted);
+    state = beginChangesRefresh(state, 2);
+
+    expect(completeChangesRefresh(state, 1, accepted)).toBe(state);
+    expect(workingTreeForChanges(state, snapshotSummary)).toEqual(accepted.summary);
+    state = completeChangesRefresh(state, 2, newer);
+    expect(workingTreeForChanges(state, snapshotSummary)).toEqual(newer.summary);
   });
 
   it("does not let a stale selected-file response overwrite a newer selection", () => {

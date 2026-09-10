@@ -413,12 +413,15 @@ mod tests {
                 "read_file_diff",
                 std::iter::empty::<&str>(),
                 64,
-                Duration::from_millis(250),
+                // The fixture must be scheduled once to record its PID before
+                // the deadline fires. Keep the production timeout policy out
+                // of this scheduling-sensitive cleanup regression.
+                Duration::from_secs(1),
             )
             .expect_err("fixture should exceed the deadline");
 
         assert_eq!(error.code, "git_command_timed_out");
-        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(started.elapsed() < Duration::from_secs(3));
         let pid = fs::read_to_string(&pid_file).expect("fixture should record its PID");
         assert!(
             !Path::new("/proc").join(pid).exists(),

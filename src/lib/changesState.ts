@@ -4,6 +4,7 @@ import type {
   FileDiff,
   OrbitError,
   RepositoryChanges,
+  RepositorySnapshot,
 } from "./tauri";
 
 export type ChangeSelection = {
@@ -40,6 +41,13 @@ export function createEmptyChangesState(): ChangesState {
     selected: null,
     diff: { status: "idle", error: null, data: null, requestId: 0 },
   };
+}
+
+export function workingTreeForChanges(
+  state: ChangesState,
+  fallback: RepositorySnapshot["workingTree"],
+): RepositorySnapshot["workingTree"] {
+  return state.data?.summary ?? fallback;
 }
 
 export function beginChangesRefresh(state: ChangesState, requestId: number): ChangesState {

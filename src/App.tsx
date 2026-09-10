@@ -11,6 +11,7 @@ import {
   createEmptyChangesState,
   failChangesRefresh,
   failDiffLoad,
+  workingTreeForChanges,
   type ChangesState,
 } from "./lib/changesState";
 import {
@@ -234,11 +235,14 @@ function RepositoryWorkspace({
 }) {
   const headLabel = repository.head.detached ? "Detached HEAD" : (repository.head.branch ?? "Unborn branch");
   const oid = repository.head.oid?.slice(0, 8);
+  const workingTree = workspaceView === "changes"
+    ? workingTreeForChanges(changes, repository.workingTree)
+    : repository.workingTree;
   return (
     <div className="workspace">
       <section className="repository-heading"><div><p className="eyebrow">Repository</p><h1>{repository.displayName}</h1><p className="repository-path" title={repository.root}>{repository.root}</p></div><button className="button button-secondary" onClick={onRefresh} disabled={refreshing}>{refreshing ? "Refreshing..." : "Refresh"}</button></section>
-      <section className="state-rail" aria-label="Current Git state"><div className="state-identity"><span className={`state-dot ${repository.workingTree.clean ? "clean" : "dirty"}`} aria-hidden="true" /><strong>{headLabel}</strong>{oid && <code>{oid}</code>}</div><div className="state-summary"><span>{repository.workingTree.clean ? "Working tree clean" : "Working tree changed"}</span><span>{repository.workingTree.staged + repository.workingTree.unstaged + repository.workingTree.untracked} changes</span></div></section>
-      <section className="change-strip" aria-label="Working tree summary"><ChangeCount label="Staged" value={repository.workingTree.staged} /><ChangeCount label="Unstaged" value={repository.workingTree.unstaged} /><ChangeCount label="Untracked" value={repository.workingTree.untracked} /><ChangeCount label="Conflicted" value={repository.workingTree.conflicted} alert /><div className="upstream-summary"><span>Upstream</span><strong>{repository.head.upstream ?? "Not configured"}</strong>{repository.head.upstream && <small>{repository.head.ahead ?? 0} ahead, {repository.head.behind ?? 0} behind</small>}</div></section>
+      <section className="state-rail" aria-label="Current Git state"><div className="state-identity"><span className={`state-dot ${workingTree.clean ? "clean" : "dirty"}`} aria-hidden="true" /><strong>{headLabel}</strong>{oid && <code>{oid}</code>}</div><div className="state-summary"><span>{workingTree.clean ? "Working tree clean" : "Working tree changed"}</span><span>{workingTree.staged + workingTree.unstaged + workingTree.untracked} changes</span></div></section>
+      <section className="change-strip" aria-label="Working tree summary"><ChangeCount label="Staged" value={workingTree.staged} /><ChangeCount label="Unstaged" value={workingTree.unstaged} /><ChangeCount label="Untracked" value={workingTree.untracked} /><ChangeCount label="Conflicted" value={workingTree.conflicted} alert /><div className="upstream-summary"><span>Upstream</span><strong>{repository.head.upstream ?? "Not configured"}</strong>{repository.head.upstream && <small>{repository.head.ahead ?? 0} ahead, {repository.head.behind ?? 0} behind</small>}</div></section>
       <div className="workspace-toolbar" role="group" aria-label="Workspace view">
         <button className={`workspace-view-button${workspaceView === "history" ? " is-active" : ""}`} type="button" aria-pressed={workspaceView === "history"} onClick={() => onViewChange("history")}>History</button>
         <button className={`workspace-view-button${workspaceView === "changes" ? " is-active" : ""}`} type="button" aria-pressed={workspaceView === "changes"} onClick={() => onViewChange("changes")}>Changes</button>
