@@ -65,15 +65,15 @@
 
 ## 4. M2 tests and security gate
 
-- [ ] Cover every supported porcelain record/XY form, bounds, malformed output, and raw path cases.
+- [x] Cover every supported porcelain record/XY form, bounds, malformed output, and raw path cases.
 - [x] Cover unified hunk parsing, line accounting, metadata-only changes, no-newline markers, invalid UTF-8, and bounds.
 - [x] Cover real staged, unstaged, both-sided, add/delete, rename/copy, unborn, untracked, conflict, binary, and symlink repositories plus direct special-file/FIFO rejection.
-- [ ] Prove M2 reads do not execute content filters, textconv, external diff, pager, fsmonitor, hooks, or promisor remotes.
+- [x] Prove M2 reads do not execute content filters, textconv, external diff, pager, fsmonitor, hooks, or promisor remotes.
 - [x] Verify the M2 deadline terminates and reaps a deliberately stalled child.
-- [ ] Prove special-file replacement races cannot leave a Git child running indefinitely.
-- [ ] Cover successful refresh replacement, failed-refresh preservation, stale file handles, and stale frontend responses.
+- [x] Prove special-file replacement races cannot leave a Git child running indefinitely.
+- [x] Cover successful refresh replacement, failed-refresh preservation, stale file handles, and stale frontend responses.
 - [x] Confirm no generic Git/process/filesystem IPC and no Tauri capability expansion.
-- [ ] Run the complete frontend and Rust gate plus the Tauri debug build before the M2 PR.
+- [x] Run the complete frontend and Rust gate plus the Tauri debug build before the M2 PR.
 - [ ] Perform a real-repository desktop smoke when the environment can drive the native picker.
 
 ---

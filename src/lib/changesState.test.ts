@@ -8,6 +8,7 @@ import {
   completeDiffLoad,
   createEmptyChangesState,
   failChangesRefresh,
+  failDiffLoad,
   groupChanges,
   workingTreeForChanges,
 } from "./changesState";
@@ -143,5 +144,17 @@ describe("changes state", () => {
     expect(completeDiffLoad(state, 1, diff("change-set-one", "first", "unstaged"))).toBe(state);
     const completed = completeDiffLoad(state, 2, diff("change-set-one", "second", "unstaged"));
     expect(completed.diff.data?.fileId).toBe(data.files[1].fileId);
+  });
+
+  it("ignores stale refresh and selected-file failures", () => {
+    const data = changes("change-set-one", [file("first"), file("second")]);
+    let state = completeChangesRefresh(beginChangesRefresh(createEmptyChangesState(), 1), 1, data);
+    state = beginChangesRefresh(state, 2);
+    expect(failChangesRefresh(state, 1, error)).toBe(state);
+
+    state = completeChangesRefresh(state, 2, data);
+    state = beginDiffLoad(state, 1, { fileId: data.files[0].fileId, side: "unstaged" });
+    state = beginDiffLoad(state, 2, { fileId: data.files[1].fileId, side: "unstaged" });
+    expect(failDiffLoad(state, 1, error)).toBe(state);
   });
 });

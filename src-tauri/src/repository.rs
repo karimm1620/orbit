@@ -2191,6 +2191,79 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn m2_reads_do_not_execute_configured_pager_or_hooks() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let repository = TestRepository::new();
+        repository.commit_file("tracked.txt", "base\n", "Base");
+
+        let pager_marker = repository.root.join("pager-ran");
+        let hook_marker = repository.root.join("hook-ran");
+        let pager = repository.root.join("pager-helper");
+        repository.write(
+            "pager-helper",
+            &format!("#!/bin/sh\n: > '{}'\ncat\n", pager_marker.display()),
+        );
+        let mut permissions = fs::metadata(&pager).expect("pager metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&pager, permissions).expect("make pager executable");
+
+        let hooks = repository.root.join("hooks");
+        fs::create_dir(&hooks).expect("create hooks directory");
+        for name in ["pre-commit", "post-index-change", "reference-transaction"] {
+            let hook = hooks.join(name);
+            fs::write(
+                &hook,
+                format!("#!/bin/sh\n: > '{}'\nexit 0\n", hook_marker.display()),
+            )
+            .expect("write hook fixture");
+            let mut permissions = fs::metadata(&hook).expect("hook metadata").permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&hook, permissions).expect("make hook executable");
+        }
+
+        repository.git_ok([
+            "config",
+            "core.pager",
+            pager.to_str().expect("UTF-8 pager path"),
+        ]);
+        repository.git_ok(["config", "pager.status", "true"]);
+        repository.git_ok(["config", "pager.diff", "true"]);
+        repository.git_ok([
+            "config",
+            "core.hooksPath",
+            hooks.to_str().expect("UTF-8 hooks path"),
+        ]);
+        repository.write("tracked.txt", "changed\n");
+
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open protected repository");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("read protected changes");
+        let tracked = changes
+            .files
+            .iter()
+            .find(|file| file.path.text == "tracked.txt")
+            .expect("tracked change");
+        let diff = registry
+            .file_diff(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                tracked.file_id.as_str(),
+                DiffSide::Unstaged,
+            )
+            .expect("read protected diff");
+
+        assert!(matches!(diff.content, FileDiffContent::Text { .. }));
+        assert!(!pager_marker.exists(), "configured pager must not execute");
+        assert!(!hook_marker.exists(), "configured hooks must not execute");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn selected_diff_does_not_lazy_fetch_a_missing_promised_blob() {
         use std::os::unix::fs::PermissionsExt;
 

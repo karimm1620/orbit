@@ -765,6 +765,36 @@ mod tests {
     }
 
     #[test]
+    fn parses_every_supported_ordinary_xy_facet_on_either_side() {
+        let cases = [
+            ("M.", Some(ChangeKind::Modified), None),
+            (".M", None, Some(ChangeKind::Modified)),
+            ("A.", Some(ChangeKind::Added), None),
+            (".A", None, Some(ChangeKind::Added)),
+            ("D.", Some(ChangeKind::Deleted), None),
+            (".D", None, Some(ChangeKind::Deleted)),
+            ("T.", Some(ChangeKind::TypeChanged), None),
+            (".T", None, Some(ChangeKind::TypeChanged)),
+        ];
+
+        for (xy, expected_staged, expected_unstaged) in cases {
+            let parsed = parse_status(&ordinary(xy, ["100644", "100755", "120000"], xy.as_bytes()))
+                .expect("supported ordinary XY state");
+            let entry = &parsed.changes[0];
+            assert_eq!(
+                entry.staged.as_ref().map(|facet| facet.kind),
+                expected_staged,
+                "staged facet for {xy}",
+            );
+            assert_eq!(
+                entry.unstaged.as_ref().map(|facet| facet.kind),
+                expected_unstaged,
+                "unstaged facet for {xy}",
+            );
+        }
+    }
+
+    #[test]
     fn parses_rename_copy_origin_framing_and_similarity() {
         let mut fixture =
             format!("2 R. N... 100644 100644 100644 {ONE_OID} {TWO_OID} R075 renamed.txt\0")

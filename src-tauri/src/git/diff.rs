@@ -1000,6 +1000,60 @@ mod tests {
         fs::remove_dir_all(root).expect("remove FIFO fixture");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn replacement_with_a_fifo_cannot_outlive_the_git_deadline() {
+        use std::{
+            process::Command,
+            time::{Instant, SystemTime, UNIX_EPOCH},
+        };
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "orbit-diff-fifo-race-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).expect("create FIFO race fixture directory");
+        let path = root.join("changed.txt");
+        fs::write(&path, b"regular before validation\n").expect("write regular fixture");
+        assert_eq!(
+            validate_worktree_file(&root, b"changed.txt").expect("validate regular file"),
+            None,
+        );
+
+        fs::remove_file(&path).expect("replace validated file");
+        let status = Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success());
+
+        let paths = vec![OsString::from("/dev/null"), OsString::from("./changed.txt")];
+        let args = diff_arguments(
+            &BTreeSet::new(),
+            DiffMode::Untracked,
+            ChangeKind::Untracked,
+            &paths,
+        );
+        let started = Instant::now();
+        let error = GitRunner::default()
+            .run_with_deadline(
+                Some(&root),
+                DIFF_OPERATION,
+                args,
+                DIFF_OUTPUT_LIMIT,
+                Duration::from_secs(1),
+            )
+            .expect_err("Git should time out after the file becomes a FIFO");
+
+        assert_eq!(error.code, "git_command_timed_out");
+        assert!(started.elapsed() < Duration::from_secs(3));
+        fs::remove_dir_all(root).expect("remove FIFO race fixture directory");
+    }
+
     #[test]
     fn reports_a_missing_worktree_file_without_following_any_path() {
         let root = std::env::temp_dir();
