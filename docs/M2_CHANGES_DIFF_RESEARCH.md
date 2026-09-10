@@ -7,8 +7,8 @@
 **Evidence environment:** Linux 7.2.2 x86_64, native Git 2.55.0
 
 This document records the Git experiments and architecture decisions that guide M2. The detailed
-changes service and selected-file diff/parser slices now implement this accepted model; the UI and
-all mutations remain pending.
+changes service, selected-file diff/parser, and initial read-only Changes/Diff UI implement this
+accepted model; all mutations remain pending.
 
 ---
 

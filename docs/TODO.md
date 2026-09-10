@@ -51,15 +51,15 @@
 
 ## 3. Changes and diff UI
 
-- [ ] Integrate detailed changes with the existing repository refresh generation.
-- [ ] Present staged, unstaged, untracked, and conflicted state without duplicating one logical entry unnecessarily.
-- [ ] Preserve staged-plus-unstaged state on the same file.
-- [ ] Add accessible file selection and selected-side behavior.
-- [ ] Render typed hunks as ordinary escaped DOM text.
-- [ ] Add explicit binary, conflict, submodule, too-large, unavailable, loading, and empty states.
-- [ ] Keep refresh and file-switch errors contextual without discarding the prior valid list.
-- [ ] Reject stale change-set/diff responses after refresh or repository switch.
-- [ ] Do not add syntax highlighting until its need and cost are measured.
+- [x] Integrate detailed changes with the existing repository refresh generation.
+- [x] Present staged, unstaged, untracked, and conflicted state without duplicating one logical entry unnecessarily.
+- [x] Preserve staged-plus-unstaged state on the same file.
+- [x] Add accessible file selection and selected-side behavior.
+- [x] Render typed hunks as ordinary escaped DOM text.
+- [x] Add explicit binary, conflict, submodule, too-large, unavailable, loading, and empty states.
+- [x] Keep refresh and file-switch errors contextual without discarding the prior valid list.
+- [x] Reject stale change-set/diff responses after refresh or repository switch.
+- [x] Do not add syntax highlighting until its need and cost are measured.
 
 ---
 

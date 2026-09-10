@@ -575,6 +575,14 @@ acquisition. This is read-committed consistency: the selected Git command sees c
 while change-set IDs and frontend request generations prevent its response from being attached to
 a newer list.
 
+The initial M2 UI keeps this model in feature-local React state. A successful repository refresh
+starts a fresh detailed-status request alongside the existing history refresh and clears the selected
+file/diff only when the new change set succeeds. A failed change refresh retains the prior list and
+surfaces its error contextually. File-side selection carries only the opaque file ID and closed side;
+its request is accepted only when the repository generation, change-set identity, selected file,
+side, and local diff request generation still match. The renderer consumes typed hunks as escaped
+DOM text and maps every non-text state to an explicit read-only panel.
+
 The exact command policy, byte/path model, initial bounds, experiments, and deferred cases are
 recorded in `M2_CHANGES_DIFF_RESEARCH.md`. No syntax-highlighting, file-watching, graph, database,
 or state-management dependency is approved by this architecture.

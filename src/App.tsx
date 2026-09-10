@@ -1,12 +1,27 @@
 import { useMemo, useRef, useState } from "react";
 import "./App.css";
+import { ChangesWorkspace } from "./components/ChangesWorkspace";
 import { CommitDetails } from "./components/CommitDetails";
 import { CommitGraph } from "./components/CommitGraph";
 import {
+  beginChangesRefresh,
+  beginDiffLoad,
+  completeChangesRefresh,
+  completeDiffLoad,
+  createEmptyChangesState,
+  failChangesRefresh,
+  failDiffLoad,
+  type ChangesState,
+} from "./lib/changesState";
+import {
+  getFileDiff,
   getCommitHistoryPage,
+  getRepositoryChanges,
   getRepositorySnapshot,
+  type ChangedFile,
   type CommitHistoryHead,
   type CommitHistoryPage,
+  type DiffSide,
   type HistoryCursor,
   type OrbitError,
   type RepositorySnapshot,
@@ -17,6 +32,7 @@ import { createInitialTopologyState, reduceTopology, type GraphContinuation, typ
 
 type RequestState = "idle" | "opening" | "refreshing";
 type HistoryRequestState = "idle" | "loading" | "loading-more";
+type WorkspaceView = "history" | "changes";
 
 type HistoryState = {
   rows: readonly GraphRow[];
@@ -37,10 +53,14 @@ function createEmptyHistory(): HistoryState {
 function App() {
   const [repository, setRepository] = useState<RepositorySnapshot | null>(null);
   const [history, setHistory] = useState<HistoryState>(createEmptyHistory);
+  const [changes, setChanges] = useState<ChangesState>(createEmptyChangesState);
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("history");
   const [selectedOid, setSelectedOid] = useState<string | null>(null);
   const [error, setError] = useState<OrbitError | null>(null);
   const [requestState, setRequestState] = useState<RequestState>("idle");
   const requestSequence = useRef(0);
+  const changesRequestSequence = useRef(0);
+  const diffRequestSequence = useRef(0);
 
   async function openRepository() {
     const pickerSequence = requestSequence.current;
@@ -55,7 +75,11 @@ function App() {
       setError(null);
       setRepository(selected);
       setSelectedOid(null);
-      await loadInitialHistory(selected, sequence);
+      setChanges(createEmptyChangesState());
+      await Promise.all([
+        loadInitialHistory(selected, sequence),
+        loadRepositoryChanges(selected, sequence),
+      ]);
     } catch (requestError) {
       if (pickerSequence === requestSequence.current) setError(toOrbitError(requestError));
     } finally {
@@ -79,7 +103,10 @@ function App() {
       const refreshed = await getRepositorySnapshot(repository.repositoryId);
       if (sequence !== requestSequence.current) return;
       setRepository(refreshed);
-      await loadInitialHistory(refreshed, sequence);
+      await Promise.all([
+        loadInitialHistory(refreshed, sequence),
+        loadRepositoryChanges(refreshed, sequence),
+      ]);
     } catch (requestError) {
       if (sequence === requestSequence.current) {
         const orbitError = toOrbitError(requestError);
@@ -118,6 +145,36 @@ function App() {
     }
   }
 
+  async function loadRepositoryChanges(snapshot: RepositorySnapshot, sequence: number) {
+    const changesRequestId = ++changesRequestSequence.current;
+    setChanges((current) => beginChangesRefresh(current, changesRequestId));
+    try {
+      const result = await getRepositoryChanges(snapshot.repositoryId);
+      if (sequence !== requestSequence.current) return;
+      setChanges((current) => completeChangesRefresh(current, changesRequestId, result));
+    } catch (requestError) {
+      if (sequence !== requestSequence.current) return;
+      setChanges((current) => failChangesRefresh(current, changesRequestId, toOrbitError(requestError)));
+    }
+  }
+
+  async function selectChangedFile(file: ChangedFile, side: DiffSide) {
+    if (!repository || !changes.data) return;
+
+    const sequence = requestSequence.current;
+    const changeSetId = changes.data.changeSetId;
+    const requestId = ++diffRequestSequence.current;
+    setChanges((current) => beginDiffLoad(current, requestId, { fileId: file.fileId, side }));
+    try {
+      const result = await getFileDiff(repository.repositoryId, changeSetId, file.fileId, side);
+      if (sequence !== requestSequence.current) return;
+      setChanges((current) => completeDiffLoad(current, requestId, result));
+    } catch (requestError) {
+      if (sequence !== requestSequence.current) return;
+      setChanges((current) => failDiffLoad(current, requestId, toOrbitError(requestError)));
+    }
+  }
+
   const selectedCommit = useMemo(() => history.rows.find((row) => row.commit.oid === selectedOid)?.commit ?? null, [history.rows, selectedOid]);
   const selectedRefs = useMemo(() => history.rows.find((row) => row.commit.oid === selectedOid)?.refs ?? [], [history.rows, selectedOid]);
   const busy = requestState !== "idle";
@@ -133,12 +190,16 @@ function App() {
         <RepositoryWorkspace
           repository={repository}
           history={history}
+          changes={changes}
+          workspaceView={workspaceView}
           selectedOid={selectedOid}
           selectedCommit={selectedCommit}
           selectedRefs={selectedRefs}
           refreshing={requestState === "refreshing"}
           onRefresh={refreshRepository}
+          onViewChange={setWorkspaceView}
           onSelect={setSelectedOid}
+          onSelectChangedFile={selectChangedFile}
           onLoadMore={loadMoreHistory}
         />
       )}
@@ -155,16 +216,20 @@ function ErrorBanner({ error }: { error: OrbitError }) {
 }
 
 function RepositoryWorkspace({
-  repository, history, selectedOid, selectedCommit, selectedRefs, refreshing, onRefresh, onSelect, onLoadMore,
+  repository, history, changes, workspaceView, selectedOid, selectedCommit, selectedRefs, refreshing, onRefresh, onViewChange, onSelect, onSelectChangedFile, onLoadMore,
 }: {
   repository: RepositorySnapshot;
   history: HistoryState;
+  changes: ChangesState;
+  workspaceView: WorkspaceView;
   selectedOid: string | null;
   selectedCommit: GraphRow["commit"] | null;
   selectedRefs: readonly GraphRow["refs"][number][];
   refreshing: boolean;
   onRefresh: () => void;
+  onViewChange: (view: WorkspaceView) => void;
   onSelect: (oid: string) => void;
+  onSelectChangedFile: (file: ChangedFile, side: DiffSide) => void;
   onLoadMore: () => void;
 }) {
   const headLabel = repository.head.detached ? "Detached HEAD" : (repository.head.branch ?? "Unborn branch");
@@ -174,9 +239,15 @@ function RepositoryWorkspace({
       <section className="repository-heading"><div><p className="eyebrow">Repository</p><h1>{repository.displayName}</h1><p className="repository-path" title={repository.root}>{repository.root}</p></div><button className="button button-secondary" onClick={onRefresh} disabled={refreshing}>{refreshing ? "Refreshing..." : "Refresh"}</button></section>
       <section className="state-rail" aria-label="Current Git state"><div className="state-identity"><span className={`state-dot ${repository.workingTree.clean ? "clean" : "dirty"}`} aria-hidden="true" /><strong>{headLabel}</strong>{oid && <code>{oid}</code>}</div><div className="state-summary"><span>{repository.workingTree.clean ? "Working tree clean" : "Working tree changed"}</span><span>{repository.workingTree.staged + repository.workingTree.unstaged + repository.workingTree.untracked} changes</span></div></section>
       <section className="change-strip" aria-label="Working tree summary"><ChangeCount label="Staged" value={repository.workingTree.staged} /><ChangeCount label="Unstaged" value={repository.workingTree.unstaged} /><ChangeCount label="Untracked" value={repository.workingTree.untracked} /><ChangeCount label="Conflicted" value={repository.workingTree.conflicted} alert /><div className="upstream-summary"><span>Upstream</span><strong>{repository.head.upstream ?? "Not configured"}</strong>{repository.head.upstream && <small>{repository.head.ahead ?? 0} ahead, {repository.head.behind ?? 0} behind</small>}</div></section>
-      <div className="workspace-grid">
-        <section className="history-panel" aria-labelledby="history-title"><div className="section-heading"><div><p className="eyebrow">History</p><h2 id="history-title">Commit graph</h2></div><span>{history.rows.length} loaded</span></div>{history.status === "loading" && history.rows.length === 0 ? <HistoryLoading /> : history.error && history.rows.length === 0 ? <HistoryError error={history.error} onRetry={onRefresh} /> : history.rows.length === 0 ? <HistoryEmpty /> : <><CommitGraph rows={history.rows} continuation={history.continuation} selectedOid={selectedOid} onSelect={onSelect} /><HistoryFooter history={history} onLoadMore={onLoadMore} onRetry={onRefresh} /></>}</section>
-        <CommitDetails commit={selectedCommit} refs={selectedRefs} />
+      <div className="workspace-toolbar" role="group" aria-label="Workspace view">
+        <button className={`workspace-view-button${workspaceView === "history" ? " is-active" : ""}`} type="button" aria-pressed={workspaceView === "history"} onClick={() => onViewChange("history")}>History</button>
+        <button className={`workspace-view-button${workspaceView === "changes" ? " is-active" : ""}`} type="button" aria-pressed={workspaceView === "changes"} onClick={() => onViewChange("changes")}>Changes</button>
+      </div>
+      <div className={`workspace-grid${workspaceView === "changes" ? " workspace-grid-changes" : ""}`}>
+        {workspaceView === "history" ? <>
+          <section className="history-panel" aria-labelledby="history-title"><div className="section-heading"><div><p className="eyebrow">History</p><h2 id="history-title">Commit graph</h2></div><span>{history.rows.length} loaded</span></div>{history.status === "loading" && history.rows.length === 0 ? <HistoryLoading /> : history.error && history.rows.length === 0 ? <HistoryError error={history.error} onRetry={onRefresh} /> : history.rows.length === 0 ? <HistoryEmpty /> : <><CommitGraph rows={history.rows} continuation={history.continuation} selectedOid={selectedOid} onSelect={onSelect} /><HistoryFooter history={history} onLoadMore={onLoadMore} onRetry={onRefresh} /></>}</section>
+          <CommitDetails commit={selectedCommit} refs={selectedRefs} />
+        </> : <ChangesWorkspace changes={changes} onRefresh={onRefresh} onSelect={onSelectChangedFile} />}
       </div>
     </div>
   );
