@@ -54,7 +54,7 @@ function ChangesList({
           <p className="eyebrow">Working tree</p>
           <h2 id="changes-title">Changes</h2>
         </div>
-        {changes.data && <span>{changes.data.files.length} files</span>}
+        {changes.data && <span>{formatFileCount(changes.data.files.length)}</span>}
       </div>
       {changes.error && (
         <div className="changes-inline-error" role="alert">
@@ -69,7 +69,7 @@ function ChangesList({
       ) : groups.length === 0 ? (
         <ChangesEmpty />
       ) : (
-        <nav className="change-groups" aria-label="Changed files">
+        <div className="change-groups">
           {groups.map((group) => (
             <section className="change-group" key={group.id} aria-labelledby={`change-group-${group.id}`}>
               <div className="change-group-heading">
@@ -88,7 +88,7 @@ function ChangesList({
               </ul>
             </section>
           ))}
-        </nav>
+        </div>
       )}
     </section>
   );
@@ -142,6 +142,7 @@ function ChangeFileRow({
 }
 
 function DiffViewer({ changes, onRetry }: { changes: ChangesState; onRetry: () => void }) {
+  const selectedFile = changes.data?.files.find((file) => file.fileId === changes.selected?.fileId) ?? null;
   const selectedLabel = changes.diff.data?.content.state === "conflict"
     ? "Conflict"
     : changes.selected?.side === "staged"
@@ -156,6 +157,7 @@ function DiffViewer({ changes, onRetry }: { changes: ChangesState; onRetry: () =
         <div>
           <p className="eyebrow">Selected file</p>
           <h2 id="diff-title">Diff</h2>
+          {selectedFile && <p className="selected-diff-path" title={selectedFile.path.text}>{selectedFile.path.text}</p>}
         </div>
         {selectedLabel && <span>{selectedLabel}</span>}
       </div>
@@ -324,4 +326,8 @@ function unavailableMessage(reason: Extract<FileDiffContent, { state: "unavailab
 
 function formatRange(start: number, count: number) {
   return count === 1 ? `${start}` : `${start},${count}`;
+}
+
+function formatFileCount(count: number) {
+  return `${count} ${count === 1 ? "file" : "files"}`;
 }
