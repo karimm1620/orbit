@@ -76,7 +76,7 @@ impl OrbitError {
         Self {
             code: "git_capability_unavailable",
             title: "Git needs an update",
-            message: "Secure commit-history loading requires a Git version that supports disabling lazy object fetching.".into(),
+            message: "Secure history and diff loading requires a Git version that supports disabling lazy object fetching.".into(),
             operation: "detect_git_capabilities",
             recoverable: true,
             details: None,
@@ -100,6 +100,28 @@ impl OrbitError {
             title: "Commit history request is invalid",
             message: message.into(),
             operation: "read_commit_history",
+            recoverable: true,
+            details: None,
+        }
+    }
+
+    pub fn change_set_unavailable() -> Self {
+        Self {
+            code: "change_set_unavailable",
+            title: "Changes need to refresh",
+            message: "This change list is invalid, expired, or has been replaced. Refresh the repository changes to continue.".into(),
+            operation: "read_repository_changes",
+            recoverable: true,
+            details: None,
+        }
+    }
+
+    pub fn changes_refresh_superseded() -> Self {
+        Self {
+            code: "changes_refresh_superseded",
+            title: "A newer refresh is available",
+            message: "This repository-changes request was superseded by a newer refresh.".into(),
+            operation: "read_repository_changes",
             recoverable: true,
             details: None,
         }
@@ -129,6 +151,21 @@ impl OrbitError {
             recoverable: true,
             details: None,
         }
+    }
+
+    pub fn git_timed_out(operation: &'static str) -> Self {
+        Self {
+            code: "git_command_timed_out",
+            title: "Git took too long",
+            message: "Git did not finish within Orbit's bounded read deadline.".into(),
+            operation,
+            recoverable: true,
+            details: None,
+        }
+    }
+
+    pub(crate) fn is_output_too_large_for(&self, operation: &'static str) -> bool {
+        self.operation == operation && self.title == "Repository response is too large"
     }
 
     pub fn internal(operation: &'static str, message: impl Into<String>) -> Self {

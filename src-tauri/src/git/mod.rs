@@ -1,8 +1,13 @@
+mod diff;
 mod graph;
 mod history;
 mod process;
 mod status;
 
+pub(crate) use diff::{read_file_diff, DiffSelection};
+#[cfg(test)]
+pub use diff::{DiffLineKind, DiffUnavailableReason, FileDiffContent};
+pub use diff::{DiffSide, FileDiff};
 #[cfg(test)]
 pub use graph::CommitRefKind;
 pub use graph::{
@@ -11,4 +16,9 @@ pub use graph::{
 };
 pub use history::{read_recent_commits, CommitSummary};
 pub use process::GitRunner;
-pub use status::{read_status, HeadSnapshot, WorkingTreeSnapshot};
+#[cfg(test)]
+pub use status::ChangeKind;
+pub(crate) use status::{read_detailed_status, StatusEntry};
+pub use status::{
+    read_status, ChangeFacet, ConflictKind, HeadSnapshot, SubmoduleState, WorkingTreeSnapshot,
+};

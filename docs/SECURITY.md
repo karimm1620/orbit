@@ -169,7 +169,7 @@ The M0 boundary exposes only `select_repository` and `get_repository_snapshot` t
 - Refresh accepts only that repository ID and revalidates the stored root before reading it.
 - The internal Git runner launches `git` directly with separate arguments, closed stdin, bounded stdout/stderr readers, and no shell. It removes inherited `GIT_*` environment variables so launch-time repository/config overrides cannot redirect the authorized repository context.
 - After scrubbing inherited Git variables, the runner sets its own `GIT_NO_LAZY_FETCH=1` policy so Git versions that support it do not contact a promisor remote to satisfy a nominally local read.
-- Before a status read, Orbit obtains configured filter-driver names through bounded Git config output and overrides each driver's `clean`/`process` command to an empty value with `required=false`. Status also overrides `core.fsmonitor=false`, so opening a repository cannot invoke a configured content-filter program or filesystem-monitor hook.
+- Before a status read, Orbit obtains configured filter-driver names through bounded Git config output. Names containing `=` fail closed because Git's `-c name=value` grammar cannot represent their exact keys safely; every other discovered driver's `clean`/`process` command is overridden to an empty value with `required=false`. Status also overrides `core.fsmonitor=false`, so opening a repository cannot invoke a configured content-filter program or filesystem-monitor hook.
 - Recent-history reads explicitly disable signature verification, decorations, notes, patch output, external diffs, and text conversion. This prevents repository configuration such as `log.showSignature` or a diff/textconv driver from turning the M0 history query into process execution.
 - The unused scaffold opener plugin and permission are removed.
 
@@ -210,6 +210,64 @@ transport state, not a replacement for repository authorization: Rust also reval
 repository ID and canonical root on every request. If the root becomes unavailable or resolves
 differently, all sessions for that repository ID are invalidated. No Tauri capability was added;
 the WebView retains only `core:default`.
+
+### M2 read-only changes/diff boundary
+
+M2's implemented `get_repository_changes` domain operation accepts only an authorized repository
+ID. Rust runs the hardened detailed-status query, retains byte-exact relative current/origin paths,
+and returns deterministic display text with opaque Rust-issued change-set/file IDs. Change sets are
+repository/root-bound, process-local, capped at eight active entries, expire after 15 minutes idle,
+and are installed only after the full status result succeeds; a successful refresh retires the
+prior set for that repository. The WebView cannot submit a path, revision, pathspec, format, or Git
+argument.
+
+The implemented `get_file_diff` operation contains only the authorized repository ID,
+change-set/file IDs, and a closed staged/unstaged side. Rust reauthorizes the repository/root,
+resolves byte-exact paths from the bounded change-set registry, and compares a fresh hardened status
+record before every read. React cannot provide a path, revision, object expression, pathspec, or Git
+option.
+
+Detailed status reuses M0's content-filter discovery/neutralization and `core.fsmonitor=false`, and
+adds the M1 fail-closed `--no-lazy-fetch` requirement. M2 diff commands must additionally set all of
+the following explicitly:
+
+- `--no-pager`
+- `--no-lazy-fetch`
+- `--no-optional-locks`
+- `--literal-pathspecs` before the `diff` subcommand
+- `-c diff.suppressBlankEmpty=false`
+- `--no-ext-diff`
+- `--no-textconv`
+- `--no-color`
+- bounded rename/copy detection and output formatting
+- `--` before every Rust-owned path argument
+
+`--` prevents option parsing but does not disable pathspec globbing or magic. Literal-pathspec mode
+ensures an authorized filename such as `*.txt` cannot select other repository paths. The explicit
+blank-line override prevents repository configuration from removing unified-diff context prefixes
+that the bounded parser requires.
+
+Controlled repositories proved that a working-tree diff can execute configured clean filters,
+textconv programs, external diff programs, or a promisor remote when these protections are absent.
+Git 2.55 also proved that a legal filter driver containing `=` defeats a naively constructed
+`-c filter.<driver>.clean=` override. Orbit therefore rejects such configuration before protected
+status or diff execution; marker tests cover both ordinary-driver neutralization and this crafted
+fail-closed path. The implementation must retain those regressions; a secure-history capability
+failure also fails M2 closed rather than falling back to a potentially networked read.
+
+Untracked files use a purpose-specific, bounded Linux no-index comparison against `/dev/null`; this
+does not grant general file reading. Rust uses non-following metadata to reject directories and
+special files. Because a file can be replaced after validation and an untracked FIFO made Git block
+in a controlled test, each selected diff invocation uses a 30-second deadline implemented inside
+the existing `GitRunner`, with child termination, reaping, and bounded pipe draining. Operations
+that do not opt into the M2 deadline retain their prior runner behavior. This extends the one
+process boundary rather than creating another one.
+
+Status paths are parsed as raw bytes. React sees only escaped display text and opaque file handles.
+Patch-header paths never establish identity. Rust validates a machine-framed numstat prefix before
+parsing bounded unified patch content into typed hunks. Binary, conflict, submodule, too-large,
+unsupported-encoding, timeout, stale, and unavailable conditions are explicit states; raw patch or
+unbounded diagnostic output is not an IPC contract. No Tauri capability expansion is required.
 
 ---
 

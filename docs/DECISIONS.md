@@ -470,6 +470,119 @@ explicit refresh starts a new snapshot. Typed refs are emitted only on the first
 
 ---
 
+## ADR-022 — Working-tree identity uses porcelain v2 and opaque change handles
+
+**Status:** Accepted
+
+### Decision
+
+Acquire M2's detailed working-tree state with one hardened
+`git status --porcelain=v2 --branch --untracked-files=all -z` query. Parse path fields as bytes in
+Rust, model staged and unstaged facets independently, and derive summary counts from the same
+semantic result.
+
+Install each successful result as a bounded process-local change set. React identifies a selected
+entry only with the authorized repository ID, opaque change-set ID, and opaque file ID. Byte-exact
+current/origin paths remain inside Rust; IPC exposes only safe display text.
+
+### Why
+
+- porcelain v2 represents ordinary, rename/copy, unmerged, and untracked state without parsing
+  localized display output
+- NUL framing preserves spaces, Unicode, tabs, newlines, leading dashes, and non-UTF-8 path bytes
+- a single semantic parse prevents detailed entries and M0 counts from disagreeing
+- opaque handles preserve filesystem authority on the privileged side
+
+### Consequences
+
+- status output and retained entries/path bytes have explicit limits
+- successfully refreshing a repository invalidates its previous change set and selected diff
+- Git's output order is undefined, so Rust applies deterministic bytewise path ordering
+- Orbit reports Git's rename/copy result and does not guess relationships for an unstaged move
+- exact framing, limits, and display escaping are recorded in `M2_CHANGES_DIFF_RESEARCH.md`
+
+---
+
+## ADR-023 — File diffs are purpose-specific Rust-parsed Git responses
+
+**Status:** Accepted
+
+### Decision
+
+Acquire a selected staged facet with `git diff --cached`, an unstaged tracked facet with
+`git diff`, and an untracked Linux file with a bounded `git diff --no-index` comparison against
+`/dev/null`. Rust supplies every path after `--`; React supplies no path or revision.
+
+Request a NUL-framed numstat prefix and unified patch in one Git invocation. Validate that the
+numstat identity exactly matches the Rust-held entry, use `-\t-` for binary classification, and
+parse text hunks in Rust. Do not use patch-header filenames as identity or send raw patch output to
+React.
+
+For rename/copy facets, pass the Rust-held origin and target together and constrain the resulting
+record with the corresponding closed `--diff-filter=R` or `--diff-filter=C`. This preserves Git's
+relationship detection without allowing a changed copy source to become an unexpected second file
+in the selected response.
+
+Return binary, conflict, submodule, too-large, unsupported-encoding, special-file, timeout, stale,
+and unavailable results as typed states. Combined conflict patches, binary previews, and lossy
+text decoding are not part of initial M2.
+
+### Why
+
+- staged and unstaged facets compare different Git states and can coexist on one file
+- one command avoids classifying one filesystem version and parsing another
+- numstat is machine-readable for binary detection while patch prose is not
+- Rust parsing centralizes bounds, malformed-output handling, and untrusted path separation
+- no-index is the native-Git way to represent an untracked file as an addition
+
+### Consequences
+
+- all M2 reads reuse `GitRunner`, require the secure no-lazy-fetch capability, and neutralize
+  pager, optional locks, fsmonitor, content filters, textconv, and external diff execution
+- configured filter drivers containing `=` fail closed before status or diff execution because
+  Git's `-c name=value` grammar cannot encode the exact dynamic key safely
+- selected paths use Git's global literal-pathspec mode, and selected diffs force
+  `diff.suppressBlankEmpty=false` so repository configuration cannot broaden selection or alter
+  the patch line-prefix grammar
+- text patch content must be UTF-8 initially; other encodings get an explicit unavailable state
+- untracked paths receive a non-following type check, and M2 Git reads receive a 30-second process
+  deadline because a FIFO experiment proved that output bounds alone cannot prevent a stalled read
+- no new production dependency is approved
+
+---
+
+## ADR-024 — Change sets use read-committed refresh semantics
+
+**Status:** Accepted
+
+### Decision
+
+A successful detailed-status refresh creates a new change set and retires the prior set for that
+repository. A failed refresh leaves the prior displayed result available with a contextual error.
+Before diff acquisition, Rust reauthorizes the repository/root, validates the change-set/file/side
+tuple, and confirms that a fresh hardened status record is compatible with the stored facet.
+
+The selected Git invocation reads current content. If another process changes the file without
+changing its status classification during that invocation, Orbit does not claim snapshot
+isolation. Responses carry their change-set identity, and the frontend request-generation guard
+prevents older results from replacing a newer refresh or selection.
+
+### Why
+
+- creating an immutable worktree snapshot would add copying, storage, and lifecycle complexity
+  disproportionate to a read-only desktop diff viewer
+- cheap semantic revalidation catches deleted, renamed, resolved, or otherwise incompatible state
+- retaining prior UI data on refresh failure keeps errors contextual without authorizing stale
+  handles indefinitely
+
+### Consequences
+
+- stale handles return a structured refresh-required error
+- process-local change sets are bounded, expire, and do not survive restart
+- file watching and polling remain deferred; explicit refresh is authoritative in initial M2
+
+---
+
 ## Deferred decisions
 
 The following are intentionally not locked yet:

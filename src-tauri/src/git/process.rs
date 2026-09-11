@@ -6,6 +6,7 @@ use std::{
     process::{Command, ExitStatus, Stdio},
     sync::{Arc, OnceLock},
     thread,
+    time::{Duration, Instant},
 };
 
 use crate::error::OrbitError;
@@ -117,6 +118,36 @@ impl GitRunner {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
+        self.run_inner(current_dir, operation, args, stdout_limit, None)
+    }
+
+    pub(crate) fn run_with_deadline<I, S>(
+        &self,
+        current_dir: Option<&Path>,
+        operation: &'static str,
+        args: I,
+        stdout_limit: usize,
+        deadline: Duration,
+    ) -> Result<GitOutput, OrbitError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        self.run_inner(current_dir, operation, args, stdout_limit, Some(deadline))
+    }
+
+    fn run_inner<I, S>(
+        &self,
+        current_dir: Option<&Path>,
+        operation: &'static str,
+        args: I,
+        stdout_limit: usize,
+        deadline: Option<Duration>,
+    ) -> Result<GitOutput, OrbitError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
         let mut command = Command::new(&self.executable);
         command
             .args(args)
@@ -152,11 +183,13 @@ impl GitRunner {
 
         let stdout_reader = thread::spawn(move || read_bounded(stdout, stdout_limit));
         let stderr_reader = thread::spawn(move || read_bounded(stderr, STDERR_LIMIT));
-        let status = child
-            .wait()
-            .map_err(|error| OrbitError::internal(operation, error.to_string()))?;
+        let (status, timed_out) = wait_for_child(&mut child, operation, deadline)?;
         let stdout = join_reader(operation, stdout_reader)?;
         let stderr = join_reader(operation, stderr_reader)?;
+
+        if timed_out {
+            return Err(OrbitError::git_timed_out(operation));
+        }
 
         if stdout.exceeded || stderr.exceeded {
             return Err(OrbitError::output_too_large(operation));
@@ -189,6 +222,39 @@ impl GitRunner {
     #[cfg(not(test))]
     fn test_environment_names(&self) -> impl Iterator<Item = OsString> + '_ {
         std::iter::empty()
+    }
+}
+
+fn wait_for_child(
+    child: &mut std::process::Child,
+    operation: &'static str,
+    deadline: Option<Duration>,
+) -> Result<(ExitStatus, bool), OrbitError> {
+    let Some(deadline) = deadline else {
+        return child
+            .wait()
+            .map(|status| (status, false))
+            .map_err(|error| OrbitError::internal(operation, error.to_string()));
+    };
+
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| OrbitError::internal(operation, error.to_string()))?
+        {
+            return Ok((status, false));
+        }
+        if started.elapsed() >= deadline {
+            // `kill` can race with a natural exit. `wait` is still mandatory so a
+            // timed-out Git child is reaped before control returns to the caller.
+            let _ = child.kill();
+            let status = child
+                .wait()
+                .map_err(|error| OrbitError::internal(operation, error.to_string()))?;
+            return Ok((status, true));
+        }
+        thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -305,6 +371,63 @@ mod tests {
         GitRunner::default()
             .require_no_lazy_fetch()
             .expect("development Git should support --no-lazy-fetch");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deadline_terminates_and_reaps_the_child() {
+        use std::{
+            fs,
+            os::unix::fs::PermissionsExt,
+            time::{SystemTime, UNIX_EPOCH},
+        };
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("orbit-timeout-test-{}-{nonce}", std::process::id()));
+        fs::create_dir(&root).expect("create timeout fixture directory");
+        let pid_file = root.join("pid");
+        let executable = root.join("slow-git");
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nexec sleep 10\n",
+                pid_file.display()
+            ),
+        )
+        .expect("write timeout fixture");
+        let mut permissions = fs::metadata(&executable)
+            .expect("timeout fixture metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).expect("make timeout fixture executable");
+
+        let runner = GitRunner::with_executable(&executable);
+        let started = Instant::now();
+        let error = runner
+            .run_with_deadline(
+                None,
+                "read_file_diff",
+                std::iter::empty::<&str>(),
+                64,
+                // The fixture must be scheduled once to record its PID before
+                // the deadline fires. Keep the production timeout policy out
+                // of this scheduling-sensitive cleanup regression.
+                Duration::from_secs(1),
+            )
+            .expect_err("fixture should exceed the deadline");
+
+        assert_eq!(error.code, "git_command_timed_out");
+        assert!(started.elapsed() < Duration::from_secs(3));
+        let pid = fs::read_to_string(&pid_file).expect("fixture should record its PID");
+        assert!(
+            !Path::new("/proc").join(pid).exists(),
+            "timed-out child must be reaped before return"
+        );
+        fs::remove_dir_all(root).expect("remove timeout fixture");
     }
 
     #[cfg(unix)]

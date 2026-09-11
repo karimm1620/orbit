@@ -48,6 +48,7 @@ jobs:
           pnpm build
           pnpm test:topology
           pnpm test:graph-layout
+          pnpm test:changes-state
 
       - name: Validate Rust
         working-directory: src-tauri
