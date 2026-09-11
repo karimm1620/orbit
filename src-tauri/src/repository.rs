@@ -2191,6 +2191,72 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn crafted_filter_name_fails_status_and_diff_closed_without_execution() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let repository = TestRepository::new();
+        repository.write(".gitattributes", "tracked.txt filter=a=b\n");
+        repository.write("tracked.txt", "base\n");
+        repository.git_ok(["add", "--", ".gitattributes", "tracked.txt"]);
+        repository.git_ok(["commit", "-m", "Base"]);
+        repository.write("tracked.txt", "changed\n");
+
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open repository before crafted filter configuration");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("read change set before crafted filter configuration");
+        let tracked = changes
+            .files
+            .iter()
+            .find(|file| file.path.text == "tracked.txt")
+            .expect("tracked change");
+
+        let marker = repository.root.join("crafted-filter-ran");
+        let helper = repository.root.join("crafted-filter-helper");
+        repository.write(
+            "crafted-filter-helper",
+            &format!("#!/bin/sh\n: > '{}'\ncat\n", marker.display()),
+        );
+        let mut permissions = fs::metadata(&helper)
+            .expect("helper metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&helper, permissions).expect("make helper executable");
+        repository.git_ok([
+            "config",
+            "filter.a=b.clean",
+            helper.to_str().expect("UTF-8 helper path"),
+        ]);
+        repository.git_ok(["config", "filter.a=b.required", "true"]);
+
+        let status_error = registry
+            .repository_changes(&opened.repository_id)
+            .expect_err("crafted filter name must make detailed status fail closed");
+        assert_eq!(status_error.code, "unsupported_repository_state");
+        assert_eq!(status_error.operation, "read_git_configuration");
+        assert!(
+            !marker.exists(),
+            "status must not execute the crafted filter"
+        );
+
+        let diff_error = registry
+            .file_diff(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                tracked.file_id.as_str(),
+                DiffSide::Unstaged,
+            )
+            .expect_err("crafted filter name must make selected diff fail closed");
+        assert_eq!(diff_error.code, "unsupported_repository_state");
+        assert_eq!(diff_error.operation, "read_git_configuration");
+        assert!(!marker.exists(), "diff must not execute the crafted filter");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn m2_reads_do_not_execute_configured_pager_or_hooks() {
         use std::os::unix::fs::PermissionsExt;
 

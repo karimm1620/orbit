@@ -165,6 +165,9 @@ pub(crate) fn append_filter_driver_overrides(
     args: &mut Vec<OsString>,
     filter_drivers: &BTreeSet<String>,
 ) {
+    // Production callers obtain this set only from `configured_filter_drivers`,
+    // whose parser rejects `=` before a driver can reach Git's `-c name=value`
+    // grammar.
     for driver in filter_drivers {
         args.extend([
             OsString::from("-c"),
@@ -220,6 +223,12 @@ fn parse_filter_drivers(output: &[u8]) -> Result<BTreeSet<String>, OrbitError> {
         let driver = &key[7..key.len() - suffix_length];
         if driver.len() > MAX_FILTER_DRIVER_BYTES {
             return Err(OrbitError::output_too_large("read_git_configuration"));
+        }
+        if driver.contains(&b'=') {
+            return Err(OrbitError::unsupported(
+                "read_git_configuration",
+                "A configured Git filter name contains '=' and cannot be safely neutralized.",
+            ));
         }
         let driver = std::str::from_utf8(driver).map_err(|_| {
             OrbitError::unsupported(
@@ -937,14 +946,27 @@ mod tests {
             "filter.first.clean\0",
             "filter.first.required\0",
             "FILTER.second.PROCESS\0",
+            "filter.a.b.clean\0",
+            "filter.a b.clean\0",
+            "filter.a\"b.process\0",
+            "filter.a\\b.clean\0",
+            "filter.ümlaut.clean\0",
             "diff.third.command\0",
         );
         let drivers = parse_filter_drivers(fixture.as_bytes()).expect("valid filter names");
-        assert_eq!(drivers.into_iter().collect::<Vec<_>>(), ["first", "second"]);
+        assert_eq!(
+            drivers.into_iter().collect::<Vec<_>>(),
+            ["a b", "a\"b", "a.b", "a\\b", "first", "second", "ümlaut"]
+        );
 
         let long = format!("filter.{}.clean\0", "a".repeat(MAX_FILTER_DRIVER_BYTES + 1));
         assert!(parse_filter_drivers(long.as_bytes()).is_err());
         assert!(parse_filter_drivers(b"filter.\xff.clean\0").is_err());
+
+        let unsafe_delimiter = parse_filter_drivers(b"filter.a=b.clean\0")
+            .expect_err("an equals sign cannot be represented safely in -c name=value");
+        assert_eq!(unsafe_delimiter.code, "unsupported_repository_state");
+        assert_eq!(unsafe_delimiter.operation, "read_git_configuration");
     }
 
     #[test]

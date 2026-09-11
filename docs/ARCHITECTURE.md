@@ -533,6 +533,8 @@ M2 keeps change discovery, diff acquisition, patch parsing, and rendering as sep
 Detailed state comes from one hardened, NUL-delimited porcelain v2 status read. Rust parses byte
 paths, derives the M0 summary from the same semantic entries, and returns independent staged and
 unstaged facets. Conflicts and submodules are explicit states rather than ordinary text diffs.
+Filter-driver discovery rejects names containing `=` before protected reads because Git's
+`-c name=value` form cannot safely encode that otherwise legal subsection name.
 
 React receives only an opaque change-set ID and opaque file IDs. The process-local Rust registry
 retains byte-exact current/origin paths and the parsed change facets. Purpose-specific diff IPC

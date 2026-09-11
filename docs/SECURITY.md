@@ -169,7 +169,7 @@ The M0 boundary exposes only `select_repository` and `get_repository_snapshot` t
 - Refresh accepts only that repository ID and revalidates the stored root before reading it.
 - The internal Git runner launches `git` directly with separate arguments, closed stdin, bounded stdout/stderr readers, and no shell. It removes inherited `GIT_*` environment variables so launch-time repository/config overrides cannot redirect the authorized repository context.
 - After scrubbing inherited Git variables, the runner sets its own `GIT_NO_LAZY_FETCH=1` policy so Git versions that support it do not contact a promisor remote to satisfy a nominally local read.
-- Before a status read, Orbit obtains configured filter-driver names through bounded Git config output and overrides each driver's `clean`/`process` command to an empty value with `required=false`. Status also overrides `core.fsmonitor=false`, so opening a repository cannot invoke a configured content-filter program or filesystem-monitor hook.
+- Before a status read, Orbit obtains configured filter-driver names through bounded Git config output. Names containing `=` fail closed because Git's `-c name=value` grammar cannot represent their exact keys safely; every other discovered driver's `clean`/`process` command is overridden to an empty value with `required=false`. Status also overrides `core.fsmonitor=false`, so opening a repository cannot invoke a configured content-filter program or filesystem-monitor hook.
 - Recent-history reads explicitly disable signature verification, decorations, notes, patch output, external diffs, and text conversion. This prevents repository configuration such as `log.showSignature` or a diff/textconv driver from turning the M0 history query into process execution.
 - The unused scaffold opener plugin and permission are removed.
 
@@ -242,9 +242,11 @@ the following explicitly:
 
 Controlled repositories proved that a working-tree diff can execute configured clean filters,
 textconv programs, external diff programs, or a promisor remote when these protections are absent.
-Marker tests also proved the hardened command suppresses those executions. The implementation must
-retain those regressions; a secure-history capability failure also fails M2 closed rather than
-falling back to a potentially networked read.
+Git 2.55 also proved that a legal filter driver containing `=` defeats a naively constructed
+`-c filter.<driver>.clean=` override. Orbit therefore rejects such configuration before protected
+status or diff execution; marker tests cover both ordinary-driver neutralization and this crafted
+fail-closed path. The implementation must retain those regressions; a secure-history capability
+failure also fails M2 closed rather than falling back to a potentially networked read.
 
 Untracked files use a purpose-specific, bounded Linux no-index comparison against `/dev/null`; this
 does not grant general file reading. Rust uses non-following metadata to reject directories and

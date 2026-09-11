@@ -53,6 +53,7 @@ for `git-status(1)`, `git-diff(1)`, and `gitattributes(5)` were also checked.
 | Untracked leading-`-` path | `git diff --no-index -- /dev/null ./-odd.txt` produced an all-add patch and exited `1`. | Accept exit `1` as the expected difference result only for the exact no-index operation. |
 | Combined numstat and patch | `--numstat -z --patch` emitted a NUL-framed numstat prefix, an empty NUL record, then patch bytes. Rename/copy numstat used separate origin and target path fields. | One bounded Git process can classify and acquire a selected diff consistently. Validate the prefix against the Rust-owned entry before parsing the patch suffix. |
 | Configured clean filter | An unprotected working-tree diff executed it. Empty `clean`/`process` overrides with `required=false` prevented execution. | Reuse M0 filter-driver discovery and neutralization for detailed status and working-tree diff reads. |
+| Configured clean filter named `a=b` | On Git 2.55.0, the generated `-c filter.a=b.clean=` argument did not override the real `filter.a=b.clean` key, and a working-tree diff executed the helper. | Reject a discovered driver containing `=` before protected status or diff execution. Git permits `=` in subsection names, but `-c name=value` cannot express that key unambiguously. |
 | Configured textconv and external diff | Unprotected diff commands created marker files; `--no-textconv --no-ext-diff` did not. | Both flags are mandatory for every M2 diff command. |
 | Missing promised blob | An unprotected diff invoked a configured `ext::` promisor remote. `GIT_NO_LAZY_FETCH=1` plus `--no-lazy-fetch` failed without invoking it. | M2 requires the already capability-probed secure Git mode and fails closed. |
 | Untracked symlink to `/etc/passwd` | No-index diff showed only the link target as mode `120000`; it did not dereference the target. | Symlinks may be represented, but Rust must retain root/path authority. |
@@ -91,6 +92,9 @@ git
 ```
 
 Argument ordering may follow `GitRunner` conventions, but the effective options are required.
+Filter-driver names come from bounded config output. A name containing `=` returns a structured
+unsupported-repository-state error before the status or diff command runs; other legal subsection
+characters remain representable because each override is passed as one direct argv value.
 `--untracked-files=all` yields individual selectable files rather than collapsed directory
 placeholders. `--ignore-submodules=dirty` deliberately avoids recursively scanning nested
 submodule worktrees or their configuration; a changed gitlink commit may still be reported.
@@ -360,7 +364,7 @@ selected-diff request. No polling or file watcher is approved in this phase.
 | Partial-clone network/credentials/helpers | Capability-require global `--no-lazy-fetch`; fail closed before M2 status/diff reads. |
 | Pager | Global `--no-pager`. |
 | Optional locks | Global `--no-optional-locks`. |
-| Content filters | Discover bounded configured driver names; override `clean`, `process`, and `required` exactly as M0 status does. |
+| Content filters | Discover bounded configured driver names; reject names containing `=` before the protected read, then override `clean`, `process`, and `required` for representable names exactly as M0 status does. |
 | Filesystem monitor | `-c core.fsmonitor=false`. |
 | Text conversion | `--no-textconv`. |
 | External diff programs | `--no-ext-diff`. |
