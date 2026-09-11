@@ -201,9 +201,16 @@ source is itself modified, passing both paths can otherwise emit the selected co
 source patch. Orbit therefore adds the closed facet-specific `--diff-filter=C` (or `R` for a rename)
 after bounded detection. The result remains exactly one origin/target numstat record for validation.
 
+Rust-owned paths are still Git pathspecs after `--`. Git 2.55 demonstrated that selecting the
+literal filename `*.txt` also selected unrelated matching files. Every selected diff therefore uses
+the global `--literal-pathspecs` option before the `diff` subcommand; no frontend or handcrafted
+pathspec escaping is involved.
+
 Each selected tracked diff uses one bounded invocation with this effective output policy:
 
 ```text
+-c diff.suppressBlankEmpty=false
+--literal-pathspecs
 --numstat -z --patch --full-index --no-color
 --no-ext-diff --no-textconv
 --unified=3 --diff-algorithm=myers
@@ -211,6 +218,10 @@ Each selected tracked diff uses one bounded invocation with this effective outpu
 --src-prefix=a/ --dst-prefix=b/
 -- <Rust-owned path or origin/target paths>
 ```
+
+Git 2.55 also demonstrated that repository `diff.suppressBlankEmpty=true` removes the normal space
+prefix from blank context lines. The trusted false override keeps the unified line-prefix grammar
+deterministic rather than weakening the Rust parser.
 
 The same `--no-pager`, `--no-lazy-fetch`, `--no-optional-locks`, fsmonitor override, and discovered
 filter-driver neutralization used by the detailed status boundary are mandatory. The parser first
@@ -226,7 +237,7 @@ authorized root, uses non-following metadata to reject directories and special f
 runs the same bounded output format conceptually as:
 
 ```text
-git diff --no-index <format and hardening options> -- /dev/null ./<Rust-owned path>
+git --literal-pathspecs diff --no-index <format and hardening options> -- /dev/null ./<Rust-owned path>
 ```
 
 Exit `1` is the only additional success code and is accepted only for this exact operation. The

@@ -541,6 +541,9 @@ text decoding are not part of initial M2.
   pager, optional locks, fsmonitor, content filters, textconv, and external diff execution
 - configured filter drivers containing `=` fail closed before status or diff execution because
   Git's `-c name=value` grammar cannot encode the exact dynamic key safely
+- selected paths use Git's global literal-pathspec mode, and selected diffs force
+  `diff.suppressBlankEmpty=false` so repository configuration cannot broaden selection or alter
+  the patch line-prefix grammar
 - text patch content must be UTF-8 initially; other encodings get an explicit unavailable state
 - untracked paths receive a non-following type check, and M2 Git reads receive a 30-second process
   deadline because a FIFO experiment proved that output bounds alone cannot prevent a stalled read

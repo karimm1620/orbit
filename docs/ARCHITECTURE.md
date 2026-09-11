@@ -556,10 +556,12 @@ too-large, or unavailable state. No raw patch or path authority crosses IPC.
 
 Staged patches use `git diff --cached`; unstaged patches use `git diff`. Untracked regular files and
 symlinks use a bounded Linux `git diff --no-index` comparison against `/dev/null`. All path
-arguments are Rust-owned and follow `--`. One numstat-plus-patch response provides machine-framed
-binary classification and unified patch data from the same Git invocation. Rust validates the
-numstat identity before a pure Rust patch parser produces typed hunks and lines. Patch header paths
-are never authoritative.
+arguments are Rust-owned, follow `--`, and are protected by Git's global `--literal-pathspecs`
+mode. The command also fixes `diff.suppressBlankEmpty=false` so blank context lines retain the
+prefix required by the parser. One numstat-plus-patch response provides machine-framed binary
+classification and unified patch data from the same Git invocation. Rust validates the numstat
+identity before a pure Rust patch parser produces typed hunks and lines. Patch header paths are
+never authoritative.
 
 Rename/copy reads supply both Rust-held paths. A facet-specific `--diff-filter=R` or
 `--diff-filter=C` is applied after Git's bounded detection so a modified copy source cannot add a

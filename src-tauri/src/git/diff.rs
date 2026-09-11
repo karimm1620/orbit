@@ -408,12 +408,18 @@ fn diff_arguments(
     selected_kind: ChangeKind,
     paths: &[OsString],
 ) -> Vec<OsString> {
-    let mut args = vec![OsString::from("-c"), OsString::from("core.fsmonitor=false")];
+    let mut args = vec![
+        OsString::from("-c"),
+        OsString::from("core.fsmonitor=false"),
+        OsString::from("-c"),
+        OsString::from("diff.suppressBlankEmpty=false"),
+    ];
     append_filter_driver_overrides(&mut args, filter_drivers);
     args.extend([
         OsString::from("--no-pager"),
         OsString::from("--no-lazy-fetch"),
         OsString::from("--no-optional-locks"),
+        OsString::from("--literal-pathspecs"),
         OsString::from("diff"),
     ]);
     if mode == DiffMode::Staged {
@@ -783,12 +789,14 @@ mod tests {
 
         for required in [
             "core.fsmonitor=false",
+            "diff.suppressBlankEmpty=false",
             "filter.orbit.clean=",
             "filter.orbit.process=",
             "filter.orbit.required=false",
             "--no-pager",
             "--no-lazy-fetch",
             "--no-optional-locks",
+            "--literal-pathspecs",
             "--cached",
             "--diff-filter=C",
             "--numstat",
@@ -805,6 +813,18 @@ mod tests {
         ] {
             assert!(args.iter().any(|argument| argument == required));
         }
+        let literal_pathspecs = args
+            .iter()
+            .position(|argument| argument == "--literal-pathspecs")
+            .expect("literal pathspec mode");
+        let diff = args
+            .iter()
+            .position(|argument| argument == "diff")
+            .expect("diff subcommand");
+        assert!(
+            literal_pathspecs < diff,
+            "literal mode must be a global option"
+        );
         let separator = args
             .iter()
             .position(|argument| argument == "--")

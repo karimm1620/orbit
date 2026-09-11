@@ -1929,6 +1929,100 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn selected_diff_treats_tracked_pathspec_syntax_as_a_literal_filename() {
+        let repository = TestRepository::new();
+        repository.write("*.txt", "literal base\n");
+        repository.write("other.txt", "other base\n");
+        repository.git_ok(["add", "--all"]);
+        repository.git_ok(["commit", "-m", "Base"]);
+        repository.write("*.txt", "literal changed\n");
+        repository.write("other.txt", "other changed\n");
+
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open pathspec repository");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("read pathspec changes");
+        let literal = changes
+            .files
+            .iter()
+            .find(|file| file.path.text == "*.txt")
+            .expect("literal pathspec filename");
+        let diff = registry
+            .file_diff(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                literal.file_id.as_str(),
+                DiffSide::Unstaged,
+            )
+            .expect("read literal pathspec diff");
+
+        let FileDiffContent::Text {
+            additions,
+            deletions,
+            hunks,
+            ..
+        } = diff.content
+        else {
+            panic!("expected a text diff for the literal pathspec filename");
+        };
+        assert_eq!((additions, deletions), (1, 1));
+        let changed_lines = hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .filter(|line| line.kind != DiffLineKind::Context)
+            .map(|line| line.content.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(changed_lines, ["literal base", "literal changed"]);
+    }
+
+    #[test]
+    fn selected_diff_neutralizes_suppressed_blank_context_formatting() {
+        let repository = TestRepository::new();
+        repository.commit_file("blank.txt", "alpha\n\nmiddle\n\nomega\n", "Base");
+        repository.git_ok(["config", "diff.suppressBlankEmpty", "true"]);
+        repository.write("blank.txt", "alpha\n\nchanged middle\n\nomega\n");
+
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open blank-context repository");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("read blank-context changes");
+        let blank = changes
+            .files
+            .iter()
+            .find(|file| file.path.text == "blank.txt")
+            .expect("blank-context file");
+        let diff = registry
+            .file_diff(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                blank.file_id.as_str(),
+                DiffSide::Unstaged,
+            )
+            .expect("read deterministic blank-context diff");
+
+        let FileDiffContent::Text { hunks, .. } = diff.content else {
+            panic!("expected a text diff with blank context");
+        };
+        assert_eq!(hunks.len(), 1);
+        let hunk = &hunks[0];
+        assert_eq!((hunk.old_start, hunk.old_count), (1, 5));
+        assert_eq!((hunk.new_start, hunk.new_count), (1, 5));
+        let blank_context = hunk
+            .lines
+            .iter()
+            .filter(|line| line.kind == DiffLineKind::Context && line.content.is_empty())
+            .count();
+        assert_eq!(blank_context, 2);
+    }
+
     #[test]
     fn selected_diff_classifies_binary_and_unsupported_text_encoding() {
         let binary_repository = TestRepository::new();

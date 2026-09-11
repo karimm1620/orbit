@@ -234,11 +234,18 @@ the following explicitly:
 - `--no-pager`
 - `--no-lazy-fetch`
 - `--no-optional-locks`
+- `--literal-pathspecs` before the `diff` subcommand
+- `-c diff.suppressBlankEmpty=false`
 - `--no-ext-diff`
 - `--no-textconv`
 - `--no-color`
 - bounded rename/copy detection and output formatting
 - `--` before every Rust-owned path argument
+
+`--` prevents option parsing but does not disable pathspec globbing or magic. Literal-pathspec mode
+ensures an authorized filename such as `*.txt` cannot select other repository paths. The explicit
+blank-line override prevents repository configuration from removing unified-diff context prefixes
+that the bounded parser requires.
 
 Controlled repositories proved that a working-tree diff can execute configured clean filters,
 textconv programs, external diff programs, or a promisor remote when these protections are absent.
