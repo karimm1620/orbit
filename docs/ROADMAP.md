@@ -176,6 +176,22 @@ Complete the edit → inspect → stage → commit loop.
 - commit messages never enter a shell string
 - mutation commands are repository-scoped
 
+## Accepted architecture gate
+
+- file mutations reuse opaque M2 change-set/file authority and fresh semantic preflight
+- born and unborn unstage operations use separate fixed Git commands
+- staging preserves content filters and mutation hooks while passive reads remain helper-free
+- commit messages use bounded stdin and normal commit hooks/signing remain enabled
+- mutations are serialized per repository and return refreshed applied/rejected/uncertain results
+- mutation timeouts terminate the Git process group and never imply rollback
+
+## Delivery slices
+
+- M3-B1: staging/unstaging Rust service, process-group execution, typed IPC, regressions
+- M3-B2: commit eligibility, stdin transport, hooks/signing outcomes, history invalidation
+- M3-C: accessible staging and commit workflow
+- M3-D: final security, regression, desktop-smoke, and polish gate
+
 ## Acceptance
 
 A user can perform a normal local commit workflow entirely through Orbit.

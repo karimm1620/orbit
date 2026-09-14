@@ -583,6 +583,119 @@ prevents older results from replacing a newer refresh or selection.
 
 ---
 
+## ADR-025 — Staging reuses opaque change handles and fixed Git operations
+
+**Status:** Accepted
+
+### Decision
+
+Expose only purpose-specific stage-file, unstage-file, stage-all, and unstage-all operations. A
+file operation requires the authorized repository ID, current change-set ID, and opaque file ID;
+whole-index operations require the repository and current change-set IDs. Rust revalidates fresh
+semantic status immediately before a fixed command.
+
+Use global literal-pathspec mode and Rust-owned path bytes for file operations. Stage with
+`git add --all`; unstage born paths with `git restore --staged --source=HEAD`, born repositories
+with `git reset --mixed --no-refresh HEAD`, unborn paths with `git rm --cached --force`, and unborn
+repositories with `git read-tree --empty`.
+
+Stage commands force `add.ignoreErrors=false` and all mutations force `core.fsmonitor=false`.
+Unstage commands force `submodule.recurse=false` and explicit non-recursion where available.
+Configured clean/process filters remain active for staging because they define index content.
+
+### Why
+
+- M2 already provides byte-safe repository-scoped file authority
+- Git's literal mode handles option-like/pathspec-like names without frontend escaping
+- born and unborn repositories have empirically different unstage behavior
+- forcing add's fail-fast policy prevents repository config from producing partial staging
+- fixed commands remain auditable and do not become generic IPC
+
+### Consequences
+
+- stage file means the complete current unstaged facet, not a hunk or line
+- staged rename endpoints move together; a copy action does not silently stage/unstage its source
+- conflicts and in-progress operations remain outside every M3 mutation because staging or
+  unstaging there would become partial conflict/continuation behavior
+- external content edits with the same semantic status can still race; Orbit claims read-committed,
+  not snapshot, mutation behavior
+
+---
+
+## ADR-026 — M3 preserves explicit mutation hooks and transports commit messages over stdin
+
+**Status:** Accepted and security-sensitive
+
+### Decision
+
+Create a normal commit from the existing index with a fixed
+`git commit --file=- --cleanup=verbatim` command and a bounded UTF-8 stdin message. Reject NUL,
+blank-only, and messages
+above 64 KiB in Rust; do not otherwise trim or rewrite them.
+
+Do not bypass `pre-commit`, `prepare-commit-msg`, `commit-msg`, `post-commit`,
+`post-index-change`, configured content filters, or configured commit signing. These programs may
+run only after an explicit user mutation action. Continue to prevent them during passive reads.
+Pager, fsmonitor, inherited `GIT_*` overrides, and lazy fetch remain disabled/fail-closed.
+
+Use the common M3 mutation guard to reject unresolved conflict, merge, rebase, cherry-pick, revert,
+git-am/sequencer, or squash-merge state. Detached and unborn normal commits are supported.
+
+### Why
+
+- stdin treats the message as data and avoids shell/argument injection and an Orbit temp file
+- `--file=-` bypasses editor/template launch while retaining Git's standard hook message file
+- filters, hooks, and signing are user Git policy intrinsic to a requested mutation
+- plain `git commit` was proven capable of completing merge/cherry-pick state, so preflight must be
+  purpose-specific rather than relying on conflict counts alone
+
+### Consequences
+
+- hooks can modify the final message or repository state, and Git retains its own `COMMIT_EDITMSG`
+- signing or hook failure is surfaced with bounded diagnostic context; Orbit does not retry with it
+  disabled
+- M3 does not amend, create empty commits, skip hooks/signing, or continue another operation
+
+---
+
+## ADR-027 — Mutations are serialized and return post-state-aware outcomes
+
+**Status:** Accepted and security-sensitive
+
+### Decision
+
+Use a process-local mutation registry with one in-flight action per repository and four across the
+process. Hold no registry mutex during Git I/O. Beginning a mutation advances the change-set
+generation and retires the authorizing handles; every started operation attempts to install fresh
+detailed status afterward. HEAD movement invalidates M1 history sessions.
+
+Run mutation Git processes in a Linux process group. At the operation deadline, send TERM to the
+group, wait two seconds, then send KILL if needed; wait/reap Git and drain bounded output. Never
+delete a possible Git lock file automatically. Mutation pipe readers must be cancellation-aware so
+a deliberately detached configured process cannot keep Orbit waiting indefinitely.
+
+Return an applied, rejected, or uncertain typed receipt once Git has started. Do not automatically
+retry uncertain operations. A missing post-state refresh leaves old handles invalid and explicitly
+requires refresh.
+
+### Why
+
+- Git's own locks serialize external index/ref writers but do not order overlapping Orbit workers
+- filters/hooks/signers can outlive a killed direct Git child unless its process group is stopped
+- index or HEAD updates can occur before a later hook stalls or Git returns failure
+- a status/error-only response cannot honestly imply rollback after process start
+
+### Consequences
+
+- duplicate activation receives a recoverable mutation-in-progress result
+- UI success is not optimistic; it is driven by the receipt and replacement semantic state
+- a direct `libc` dependency is acceptable if needed for Unix process-group signalling; no Git/UI
+  abstraction dependency is approved
+- exact deadlines, bounds, outcome rules, and regression evidence are in
+  `M3_STAGING_COMMIT_RESEARCH.md`
+
+---
+
 ## Deferred decisions
 
 The following are intentionally not locked yet:

@@ -269,6 +269,56 @@ parsing bounded unified patch content into typed hunks. Binary, conflict, submod
 unsupported-encoding, timeout, stale, and unavailable conditions are explicit states; raw patch or
 unbounded diagnostic output is not an IPC contract. No Tauri capability expansion is required.
 
+### M3 explicit mutation boundary
+
+M3 adds only purpose-specific stage-file, unstage-file, stage-all, unstage-all, and normal-commit
+operations. File mutations accept the opaque authorized repository/change-set/file tuple; whole
+index and commit operations accept the repository and current change-set IDs. Paths, pathspecs,
+revisions, Git arguments, hook controls, and process options remain unavailable to React.
+
+Rust revalidates the repository/root and fresh semantic status before mutation. File arguments stay
+as Rust-owned bytes under global `--literal-pathspecs` and follow `--`. Stage-all has no pathspec.
+Unstage/commit revisions such as `HEAD` are fixed service tokens, never frontend input. Every M3
+mutation fails closed during conflicts or an in-progress operation rather than becoming implicit
+conflict resolution or merge/rebase continuation.
+
+Mutation Git processes retain the inherited `GIT_*` scrub, reassert `GIT_NO_LAZY_FETCH=1`, require
+`--no-lazy-fetch`, and use no pager, no optional locks, bounded output, and fixed command forms.
+They also set `core.fsmonitor=false`. Stage operations force `add.ignoreErrors=false`; a Git 2.55
+fixture proved repository configuration could otherwise partially stage readable paths when
+another path failed. Unstage operations force `submodule.recurse=false` and non-recursion where
+supported, preventing a superproject index action from resetting a nested submodule worktree.
+
+Unlike passive reads, an explicit stage action intentionally allows configured clean/process
+filters because they define bytes written to the index. Stage/unstage intentionally allow
+`post-index-change`; commit intentionally allows `pre-commit`, `prepare-commit-msg`, `commit-msg`,
+`post-commit`, and configured signing. Orbit never retries with hooks/signing disabled. These are
+arbitrary native programs authorized by the user's explicit mutation intent, not sandboxed Orbit
+extensions; Git may itself use a shell to interpret configured helper commands, but Orbit never
+constructs or interpolates that command. Their output and Orbit's wait duration remain bounded.
+
+Commit messages are validated UTF-8 data, at most 64 KiB, nonblank, and NUL-free. Rust writes them
+to Git's stdin with `--file=- --cleanup=verbatim`; they never enter a shell or command-line option.
+No editor/template is launched and Orbit creates no plaintext message temp file. Git still creates
+its normal worktree-specific `COMMIT_EDITMSG` for hooks and may retain it after failure. Orbit does
+not persist or log the message.
+
+Permitted hooks/filters/signers make direct-child termination insufficient. Mutation-mode
+`GitRunner` starts a Linux process group, sends TERM to the group at its deadline, waits a bounded
+grace period, sends KILL if needed, waits/reaps Git, and drains bounded pipes. Orbit does not delete
+a remaining Git lock file. Mutation pipe readers are cancellation-aware so deliberately daemonized
+configured code cannot keep Orbit waiting by retaining a pipe. Process groups are not a sandbox and
+cannot promise containment of a helper that deliberately leaves the group. A process can already
+have updated the index or HEAD before a hook stalls, so timeout/output/process failures can be an
+explicit uncertain outcome rather than a false rollback claim.
+
+One Rust-owned mutation lease per repository, with a process-wide bound, serializes Orbit stage,
+unstage, and commit actions without holding a global mutex over process I/O. Beginning a mutation
+retires the authorizing change set and advances its generation. Every started mutation attempts a
+fresh semantic status installation; HEAD movement also invalidates history sessions. Old handles
+never regain authority merely because a hook or refresh failed. No Tauri capability expansion is
+approved.
+
 ---
 
 ## 5. Repository authorization
@@ -373,8 +423,10 @@ boundary. This prevents variables such as `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX
 and command-line config injection variables from changing repository identity or read behavior.
 The runner then adds only its internal `GIT_NO_LAZY_FETCH=1` policy; a caller-provided value cannot
 override it.
-Future authenticated/mutating operations must explicitly review which Git environment inputs, if
-any, need to be restored rather than inheriting them implicitly.
+M3 mutations keep the same scrub and trusted lazy-fetch policy. They do not restore inherited
+`GIT_AUTHOR_*`, `GIT_INDEX_FILE`, editor, or command-line-config variables. Git's normal config and
+the non-`GIT_*` desktop environment remain available to the intentionally permitted filters,
+hooks, and signing programs.
 
 If Orbit ever needs to disable or alter hooks for a specific operation, that must be an explicit architectural decision rather than an accidental side effect.
 
@@ -399,6 +451,11 @@ When a hook rejects an operation:
 - do not automatically retry with hooks disabled
 
 Any future "skip hooks" feature must be explicit, visible, and scoped.
+
+M3's accepted stage/unstage operations preserve `post-index-change`; its normal commit preserves
+`pre-commit`, `prepare-commit-msg`, `commit-msg`, and `post-commit`. A hook may alter repository
+state or the commit message before failing. The mutation response must therefore refresh state and
+must not promise rollback from Git's exit code alone.
 
 ---
 
@@ -604,6 +661,10 @@ If Git operations require temporary files:
 - generate unpredictable names using standard temp-file APIs
 - clean up when practical
 - never store long-lived credentials in them
+
+M3 transports the commit message over stdin and creates no Orbit-managed message file. Native Git
+still writes `COMMIT_EDITMSG` in the Git-resolved worktree administrative area for standard commit
+hooks. That Git-owned behavior is part of the accepted normal-commit contract.
 
 ---
 

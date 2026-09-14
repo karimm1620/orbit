@@ -1,88 +1,83 @@
 # Orbit — Current TODO
 
-**Current milestone:** M2 — Changes & Diff
+**Current milestone:** M3 — Staging & Commit
 
 **Rule:** keep this file execution-focused. Move completed historical detail into PR/commit history instead of turning TODO into a permanent journal.
 
 ---
 
-## 0. M2 architecture gate
+## 0. M3 architecture gate
 
-- [x] Preserve the M0/M1 native Git, Rust authorization, typed IPC, and low-privilege WebView boundary.
-- [x] Verify porcelain v2 detailed status framing in disposable repositories.
-- [x] Verify staged, unstaged, both-sided, rename/copy, conflict, unborn, binary, and untracked Git behavior.
-- [x] Verify spaces, Unicode, tabs, newlines, leading dashes, and non-UTF-8 path bytes.
-- [x] Decide opaque change-set/file identity and safe path display.
-- [x] Decide staged, unstaged, and untracked diff acquisition.
-- [x] Decide Rust patch-parser placement and typed non-text states.
-- [x] Test filter, textconv, external-diff, fsmonitor, special-file, and lazy-fetch threat surfaces.
-- [x] Lock conservative output, memory, registry, and command-duration bounds.
-- [x] Define explicit refresh and stale-response semantics.
-- [x] Record the accepted design in `M2_CHANGES_DIFF_RESEARCH.md` and ADR-022 through ADR-024.
-
----
-
-## 1. Detailed changes service
-
-- [x] Extend the existing status parser to return byte-safe semantic entries and derive M0 counts from them.
-- [x] Parse ordinary, rename/copy, unmerged, and untracked porcelain v2 NUL records.
-- [x] Represent staged and unstaged facets independently on one file entry.
-- [x] Preserve raw current/origin paths only in Rust and expose deterministic escaped display text.
-- [x] Add bounded opaque change-set/file handles tied to an authorized repository/root.
-- [x] Add purpose-specific `get_repository_changes` IPC and matching TypeScript types.
-- [x] Apply explicit rename/copy and submodule policies from the research decision.
-- [x] Add parser bounds and structured malformed/expired/replaced-handle errors.
+- [x] Preserve the M0–M2 repository authorization, native Git, typed IPC, and low-privilege WebView boundary.
+- [x] Verify byte-safe literal stage-file behavior for tracked, untracked, deleted, type-changed, symlink, mixed, and unusual paths.
+- [x] Verify born and unborn stage/unstage file/all behavior with Git 2.55.
+- [x] Define stage-all and unstage-all semantics without frontend pathspec or revision authority.
+- [x] Map staging filter, fsmonitor, and `post-index-change` execution surfaces.
+- [x] Verify bounded stdin commit messages, cleanup behavior, editor/template bypass, and Git's `COMMIT_EDITMSG` behavior.
+- [x] Verify commit hooks, hook rejection/message modification, post-commit behavior, and configured signing execution.
+- [x] Define normal-commit eligibility for conflicts and in-progress merge/rebase/cherry-pick/revert/am state.
+- [x] Prove direct-child timeout is insufficient and lock process-group termination plus applied/rejected/uncertain outcomes.
+- [x] Define per-repository mutation serialization, change-handle invalidation, and post-mutation refresh.
+- [x] Record the accepted design in `M3_STAGING_COMMIT_RESEARCH.md` and ADR-025 through ADR-027.
 
 ---
 
-## 2. Diff acquisition and parser
+## 1. M3-B1 — Staging and unstaging service
 
-- [x] Extend `GitRunner` with a bounded M2 deadline without adding another process boundary.
-- [x] Add hardened staged and unstaged selected-file diff operations.
-- [x] Add the bounded Linux no-index path for untracked regular files and symlinks.
-- [x] Revalidate change-set/file/side identity and worktree file type before acquisition.
-- [x] Parse and validate the combined NUL numstat prefix plus patch transition.
-- [x] Classify binary output from numstat rather than patch prose.
-- [x] Parse bounded unified hunks and lines in pure Rust without trusting patch-header paths.
-- [x] Return typed text, binary, conflict, submodule, too-large, unsupported-encoding, timeout, stale, and unavailable states.
-- [x] Keep combined conflict patches, binary previews, and non-UTF-8 decoding out of the initial viewer.
-
----
-
-## 3. Changes and diff UI
-
-- [x] Integrate detailed changes with the existing repository refresh generation.
-- [x] Present staged, unstaged, untracked, and conflicted state without duplicating one logical entry unnecessarily.
-- [x] Preserve staged-plus-unstaged state on the same file.
-- [x] Add accessible file selection and selected-side behavior.
-- [x] Render typed hunks as ordinary escaped DOM text.
-- [x] Add explicit binary, conflict, submodule, too-large, unavailable, loading, and empty states.
-- [x] Keep refresh and file-switch errors contextual without discarding the prior valid list.
-- [x] Reject stale change-set/diff responses after refresh or repository switch.
-- [x] Do not add syntax highlighting until its need and cost are measured.
+- [ ] Add a bounded Rust-owned mutation registry with one in-flight operation per repository.
+- [ ] Extend `GitRunner` with opt-in process-group mutation execution, TERM/KILL cleanup, null stdin, and bounded outcomes.
+- [ ] Fence older change refreshes and retire authorizing handles immediately before a mutation starts.
+- [ ] Add the fixed conflict/in-progress-operation guard shared by every M3 mutation.
+- [ ] Implement stage-file with fresh facet/path revalidation and global literal-pathspec mode.
+- [ ] Implement stage-all with fixed whole-worktree semantics and `add.ignoreErrors=false`.
+- [ ] Implement born/unborn unstage-file and unstage-all command branches.
+- [ ] Preserve configured filters and `post-index-change` while neutralizing fsmonitor and lazy fetch.
+- [ ] Return typed applied/rejected/uncertain receipts with replacement detailed changes when available.
+- [ ] Add purpose-specific IPC and TypeScript types without UI controls.
+- [ ] Cover unusual bytes, rename/copy endpoints, mixed facets, stale handles, filters/hooks, partial-failure config, concurrency, deadlines, and lock diagnostics.
 
 ---
 
-## 4. M2 tests and security gate
+## 2. M3-B2 — Normal commit service
 
-- [x] Cover every supported porcelain record/XY form, bounds, malformed output, and raw path cases.
-- [x] Cover unified hunk parsing, line accounting, metadata-only changes, no-newline markers, invalid UTF-8, and bounds.
-- [x] Prove selected diff paths are literal and repository configuration cannot suppress blank context prefixes.
-- [x] Cover real staged, unstaged, both-sided, add/delete, rename/copy, unborn, untracked, conflict, binary, and symlink repositories plus direct special-file/FIFO rejection.
-- [x] Prove M2 reads do not execute content filters, including fail-closed crafted driver names, textconv, external diff, pager, fsmonitor, hooks, or promisor remotes.
-- [x] Verify the M2 deadline terminates and reaps a deliberately stalled child.
-- [x] Prove special-file replacement races cannot leave a Git child running indefinitely.
-- [x] Cover successful refresh replacement, failed-refresh preservation, stale file handles, and stale frontend responses.
-- [x] Confirm no generic Git/process/filesystem IPC and no Tauri capability expansion.
-- [x] Run the complete frontend and Rust gate plus the Tauri debug build before the M2 PR.
-- [ ] Perform a real-repository desktop smoke when the environment can drive the native picker.
+- [ ] Add bounded stdin writing and strict NUL/blank/64-KiB message validation without trimming accepted text.
+- [ ] Reuse the fixed operation-state guard and add staged-content commit eligibility.
+- [ ] Require fresh staged content and reject unresolved conflicts or unsupported continuation state.
+- [ ] Implement index-only normal commit without editor, amend, paths, `-a`, empty commit, or hook bypass.
+- [ ] Preserve and test pre-commit, prepare-commit-msg, commit-msg, post-commit, and configured signing behavior.
+- [ ] Compare pre/post HEAD, invalidate stale history, and distinguish completed commit from uncertain process outcome.
+- [ ] Cover unborn and detached commits, hook message changes/rejections, signing failure, output bounds, timeout, stale state, and external index races.
+- [ ] Add purpose-specific commit IPC and matching TypeScript wrapper.
+
+---
+
+## 3. M3-C — Staging and commit UI
+
+- [ ] Add stage/unstage file controls without exposing paths or optimistic authority.
+- [ ] Add stage-all/unstage-all with explicit busy and contextual failure states.
+- [ ] Add accessible bounded commit-message input and staged summary.
+- [ ] Render applied, rejected, uncertain, stale, and refresh-required mutation feedback.
+- [ ] Replace change/history state only from current-generation mutation receipts and refreshes.
+- [ ] Preserve keyboard flow, focus visibility, repository switching, and duplicate-activation protection.
+
+---
+
+## 4. M3-D — Final test, security, and polish gate
+
+- [ ] Re-audit every mutation argument, stdin/environment/config surface, and opaque-handle authorization path.
+- [ ] Prove no shell, generic Git/process/filesystem IPC, frontend path/revision authority, or Tauri capability expansion.
+- [ ] Verify mutation leases, stale/superseded reads, post-state installation, history invalidation, and external lock failures.
+- [ ] Verify descendants are stopped and Git is reaped on filter/hook/signing timeout; never auto-delete locks.
+- [ ] Run the complete frontend/Rust/Tauri validation gate and report actual counts.
+- [ ] Perform a representative real-repository desktop stage/unstage/commit smoke when the environment can drive the native picker.
 
 ---
 
 ## 5. Carryover evidence gaps
 
-These remain visible and are not retroactively completed by starting M2:
+These remain visible and are not retroactively completed by starting M3:
 
+- [ ] Perform the M2 real-repository desktop smoke when the environment can drive the native picker.
 - [ ] Profile 100, 500, and 1,000 commit rows on a recorded Linux environment, including the documented p95 scroll-frame and selection-to-paint thresholds across three runs.
 - [ ] Decide whether fixed-row windowing is needed from that evidence; do not claim large-repository performance before measurement.
 - [ ] Complete a real-repository M1 desktop smoke covering nonlinear history and load-more.

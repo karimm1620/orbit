@@ -593,7 +593,66 @@ or state-management dependency is approved by this architecture.
 
 ---
 
-## 19. Persistence
+## 19. Staging and commit architecture
+
+M3 extends the existing repository registry rather than creating a generic mutation executor.
+File operations reuse the opaque M2 repository/change-set/file tuple. Stage-all, unstage-all, and
+commit use the repository ID plus the currently displayed change-set ID. Rust revalidates the
+canonical root and a fresh semantic status before selecting one fixed operation; React never sends
+a path, pathspec, revision, Git argument, or hook/process option.
+
+The accepted fixed operations are:
+
+- stage a file with `git add --all -- <Rust-owned path(s)>` under global literal-pathspec mode;
+- stage all with `git add --all` from the revalidated root;
+- unstage a born file with `git restore --staged --source=HEAD -- <Rust-owned path(s)>`;
+- unstage all in a born repository with `git reset --mixed --no-refresh HEAD`;
+- unstage an unborn file with `git rm --cached --force --quiet -- <Rust-owned path>`;
+- unstage all in an unborn repository with `git read-tree --empty`;
+- commit only the existing index with `git commit --cleanup=verbatim --file=-`, supplying a bounded
+  validated message over stdin.
+
+All operations keep the inherited `GIT_*` scrub, trusted no-lazy-fetch policy, no pager, no optional
+locks, bounded output, and repository authorization. Stage commands force `add.ignoreErrors=false`
+so repository configuration cannot opt into partial staging, and mutations force
+`core.fsmonitor=false`. Unstage commands force `submodule.recurse=false` and explicit non-recursion
+where supported so a superproject index action cannot reset a nested worktree. Staging
+intentionally preserves configured clean/process filters because they define index content. Index
+and commit hooks remain enabled, and configured commit signing is respected, because these
+programs are part of a user-requested native Git mutation rather than a passive read.
+
+A process-local mutation registry allows one operation per repository and four across the process.
+It holds no mutex during Git I/O. Beginning a mutation advances the change-set generation and
+retires the authorizing handles so an older read cannot reinstall pre-mutation authority. External
+Git remains serialized by Git's required index/ref locks; Orbit does not claim isolation from
+filesystem edits between preflight and Git.
+
+M3 mutation execution puts Git and ordinary descendants in a Linux process group. A deadline sends
+TERM to the group, waits two seconds, then sends KILL if necessary; Git is waited/reaped and bounded
+pipes are drained with cancellation-aware readers so an escaped descendant cannot hang Orbit.
+Orbit never deletes `index.lock`. Filters and hooks can mutate state before a failure or timeout,
+so results distinguish applied, rejected, and uncertain outcomes and never automatically retry an
+uncertain operation. Process groups are bounded cleanup, not a sandbox for deliberately daemonized
+configured code.
+
+After any started mutation, Rust attempts one hardened detailed-status refresh and returns a newly
+installed change set when available. Old change handles remain invalid even if refresh fails. HEAD
+movement invalidates M1 history sessions and causes the frontend to start a fresh history snapshot.
+Frontend request generations still prevent a late result from crossing a repository switch, while
+the Rust lease and registry generation remain authoritative for mutation ordering.
+
+Every M3 mutation rejects conflicts and active merge/rebase/cherry-pick/revert/am/sequencer state.
+Fixed Git probes locate worktree-specific state; Orbit does not assume `.git` is a directory.
+Normal commit additionally requires staged content and a nonblank bounded message. Detached and
+unborn normal commits are accepted. M3 does not amend, create empty commits, bypass hooks/signing,
+resolve conflicts, or continue another Git operation.
+
+The commands, experiments, typed receipt/error model, initial limits, and implementation slices are
+recorded in `M3_STAGING_COMMIT_RESEARCH.md`.
+
+---
+
+## 20. Persistence
 
 Core repository state lives in Git, not in Orbit.
 
@@ -613,7 +672,7 @@ Never persist credentials in plaintext.
 
 ---
 
-## 20. Authentication boundaries
+## 21. Authentication boundaries
 
 Basic Git remote operations should delegate authentication to Git and the user's existing environment.
 
@@ -628,7 +687,7 @@ Provider API authentication, when introduced, is a separate feature and must use
 
 ---
 
-## 21. Suggested source layout
+## 22. Suggested source layout
 
 The actual Tauri scaffold should be respected, but a target organization may evolve toward:
 
@@ -666,7 +725,7 @@ Do not reorganize a generated scaffold purely to match this tree if doing so pro
 
 ---
 
-## 22. Testing strategy
+## 23. Testing strategy
 
 ### Rust unit tests
 
@@ -708,7 +767,7 @@ Do not mock every layer when an inexpensive lower-level test can validate the re
 
 ---
 
-## 23. Validation gates
+## 24. Validation gates
 
 A milestone should not be considered complete unless the relevant checks pass.
 
@@ -726,7 +785,7 @@ Do not claim packaging, memory, startup-time, or performance results unless meas
 
 ---
 
-## 24. Observability and diagnostics
+## 25. Observability and diagnostics
 
 Orbit should eventually provide enough diagnostics to debug failures without requiring raw stack traces in the main UI.
 
@@ -749,7 +808,7 @@ Never include:
 
 ---
 
-## 25. Dependency policy
+## 26. Dependency policy
 
 Before adding a dependency, answer:
 
@@ -764,7 +823,7 @@ Avoid adding packages solely because they are common in other React or Tauri pro
 
 ---
 
-## 26. Architecture evolution rule
+## 27. Architecture evolution rule
 
 The architecture is intentionally small at the beginning.
 
