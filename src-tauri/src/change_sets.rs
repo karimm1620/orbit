@@ -94,6 +94,12 @@ pub(crate) struct AuthorizedFile {
     pub submodule: Option<SubmoduleState>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AuthorizedChangeSet {
+    pub head: HeadSnapshot,
+    pub files: Vec<AuthorizedFile>,
+}
+
 impl From<&StoredFile> for AuthorizedFile {
     fn from(file: &StoredFile) -> Self {
         Self {
@@ -138,6 +144,7 @@ impl StoredFile {
 struct ChangeSet {
     repository_id: String,
     root: PathBuf,
+    head: HeadSnapshot,
     files: HashMap<String, StoredFile>,
     last_access: Instant,
 }
@@ -254,6 +261,7 @@ impl ChangeSetRegistry {
             ChangeSet {
                 repository_id: repository_id.to_owned(),
                 root: root.to_owned(),
+                head: head.clone(),
                 files,
                 last_access: now,
             },
@@ -285,6 +293,83 @@ impl ChangeSetRegistry {
 
     pub fn invalidate_repository(&self, repository_id: &str) -> Result<(), OrbitError> {
         let mut state = self.lock_state()?;
+        state
+            .change_sets
+            .retain(|_, change_set| change_set.repository_id != repository_id);
+        Ok(())
+    }
+
+    pub(crate) fn authorize_change_set(
+        &self,
+        repository_id: &str,
+        root: &Path,
+        change_set_id: &str,
+    ) -> Result<AuthorizedChangeSet, OrbitError> {
+        let now = Instant::now();
+        let mut state = self.lock_state()?;
+        prune_expired(&mut state.change_sets, now);
+        if !valid_id(change_set_id, "change-set-") {
+            return Err(OrbitError::change_set_unavailable());
+        }
+        let change_set = state
+            .change_sets
+            .get_mut(change_set_id)
+            .filter(|change_set| {
+                change_set.repository_id == repository_id && change_set.root == root
+            })
+            .ok_or_else(OrbitError::change_set_unavailable)?;
+        change_set.last_access = now;
+        let mut files = change_set
+            .files
+            .values()
+            .map(AuthorizedFile::from)
+            .collect::<Vec<_>>();
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+        Ok(AuthorizedChangeSet {
+            head: change_set.head.clone(),
+            files,
+        })
+    }
+
+    pub(crate) fn begin_mutation(
+        &self,
+        repository_id: &str,
+        root: &Path,
+        change_set_id: &str,
+        generation: ChangesRefreshGeneration,
+    ) -> Result<(), OrbitError> {
+        let now = Instant::now();
+        let mut state = self.lock_state()?;
+        prune_expired(&mut state.change_sets, now);
+        if !valid_id(change_set_id, "change-set-") {
+            return Err(OrbitError::change_set_unavailable());
+        }
+        let authorized = state
+            .change_sets
+            .get(change_set_id)
+            .is_some_and(|change_set| {
+                change_set.repository_id == repository_id && change_set.root == root
+            });
+        if !authorized {
+            return Err(OrbitError::change_set_unavailable());
+        }
+        if state
+            .latest_refreshes
+            .get(repository_id)
+            .is_some_and(|latest| latest.generation.0 >= generation.0)
+        {
+            return Err(OrbitError::mutation_stale(
+                "A newer repository refresh superseded this staging request.",
+            ));
+        }
+
+        state.latest_refreshes.insert(
+            repository_id.to_owned(),
+            RefreshAuthority {
+                generation,
+                root: root.to_owned(),
+            },
+        );
         state
             .change_sets
             .retain(|_, change_set| change_set.repository_id != repository_id);
@@ -773,5 +858,78 @@ mod tests {
         assert!(!state
             .change_sets
             .contains_key(&first.expect("first change set")));
+    }
+
+    #[test]
+    fn mutation_fence_retires_handles_and_supersedes_older_refresh_work() {
+        let registry = ChangeSetRegistry::default();
+        let repository_id = "repository-0000000000000001";
+        let root = Path::new("/tmp/orbit-mutation-fence");
+        let changes = install_changes(&registry, repository_id, root, vec![entry(b"tracked")]);
+        let older_refresh = registry.reserve_refresh();
+        registry
+            .begin_refresh(repository_id, root, older_refresh)
+            .expect("begin older refresh");
+        let mutation_generation = registry.reserve_refresh();
+
+        registry
+            .begin_mutation(
+                repository_id,
+                root,
+                changes.change_set_id.as_str(),
+                mutation_generation,
+            )
+            .expect("begin mutation fence");
+
+        assert!(registry
+            .authorize_for_test(
+                repository_id,
+                root,
+                changes.change_set_id.as_str(),
+                changes.files[0].file_id.as_str(),
+            )
+            .is_err());
+        let superseded = registry
+            .install(
+                repository_id,
+                root,
+                older_refresh,
+                head(),
+                summary(),
+                vec![entry(b"stale")],
+            )
+            .expect_err("pre-mutation refresh cannot reinstall stale handles");
+        assert_eq!(superseded.code, "changes_refresh_superseded");
+    }
+
+    #[test]
+    fn a_newer_refresh_prevents_an_older_mutation_from_fencing_it() {
+        let registry = ChangeSetRegistry::default();
+        let repository_id = "repository-0000000000000001";
+        let root = Path::new("/tmp/orbit-mutation-generation");
+        let changes = install_changes(&registry, repository_id, root, vec![entry(b"tracked")]);
+        let mutation_generation = registry.reserve_refresh();
+        let newer_refresh = registry.reserve_refresh();
+        registry
+            .begin_refresh(repository_id, root, newer_refresh)
+            .expect("begin newer refresh");
+
+        let error = registry
+            .begin_mutation(
+                repository_id,
+                root,
+                changes.change_set_id.as_str(),
+                mutation_generation,
+            )
+            .expect_err("stale mutation must not retire newer state");
+        assert_eq!(error.code, "mutation_stale");
+        registry
+            .authorize_for_test(
+                repository_id,
+                root,
+                changes.change_set_id.as_str(),
+                changes.files[0].file_id.as_str(),
+            )
+            .expect("preexisting set remains available until newer refresh succeeds");
     }
 }

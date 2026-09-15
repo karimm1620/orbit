@@ -650,6 +650,15 @@ resolve conflicts, or continue another Git operation.
 The commands, experiments, typed receipt/error model, initial limits, and implementation slices are
 recorded in `M3_STAGING_COMMIT_RESEARCH.md`.
 
+M3-B1 implements the staging subset as four purpose-specific Tauri commands with matching typed
+TypeScript wrappers. A Rust-owned RAII registry grants one mutation lease per repository and four
+process-wide. The existing change-set generation is fenced atomically immediately before Git
+starts, and a successful post-operation detailed-status read installs the only new authoritative
+change set returned in the receipt. The mutation-mode `GitRunner` uses a small direct Unix `libc`
+binding solely for process-group TERM/KILL signalling; process launch, environment scrubbing,
+output bounds, waiting, and reaping remain inside the existing runner. Commit-message stdin and
+commit creation remain deferred to M3-B2.
+
 ---
 
 ## 20. Persistence

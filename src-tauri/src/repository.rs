@@ -11,13 +11,17 @@ use std::{
 use serde::Serialize;
 
 use crate::{
-    change_sets::{AuthorizedFile, ChangeSetRegistry, RepositoryChanges},
+    change_sets::{AuthorizedChangeSet, AuthorizedFile, ChangeSetRegistry, RepositoryChanges},
     error::OrbitError,
     git::{
-        read_detailed_status, read_file_diff, read_recent_commits, read_status, CommitSummary,
-        DiffSelection, DiffSide, FileDiff, GitRunner, HeadSnapshot, WorkingTreeSnapshot,
+        ensure_mutation_state_allowed, index_lock_exists, read_detailed_status, read_file_diff,
+        read_recent_commits, read_status, run_stage_all, run_stage_file, run_unstage_all,
+        run_unstage_file, ChangeKind, CommitSummary, DiffSelection, DiffSide, FileDiff,
+        GitMutationOutput, GitMutationTermination, GitRunner, HeadSnapshot, StatusEntry,
+        StatusSnapshot, WorkingTreeSnapshot,
     },
     history_sessions::{CommitHistoryPage, CommitHistoryRegistry},
+    mutation_registry::{MutationOperation, MutationOutcome, MutationReceipt, MutationRegistry},
 };
 
 const REPOSITORY_PROBE_LIMIT: usize = 16 * 1024;
@@ -39,6 +43,7 @@ pub struct RepositoryRegistry {
     runner: GitRunner,
     histories: CommitHistoryRegistry,
     changes: ChangeSetRegistry,
+    mutations: MutationRegistry,
 }
 
 impl Default for RepositoryRegistry {
@@ -49,6 +54,7 @@ impl Default for RepositoryRegistry {
             runner: GitRunner::default(),
             histories: CommitHistoryRegistry::default(),
             changes: ChangeSetRegistry::default(),
+            mutations: MutationRegistry::default(),
         }
     }
 }
@@ -143,6 +149,182 @@ impl RepositoryRegistry {
         )
     }
 
+    pub fn stage_file(
+        &self,
+        repository_id: &str,
+        change_set_id: &str,
+        file_id: &str,
+    ) -> Result<MutationReceipt, OrbitError> {
+        self.mutate_staging(
+            repository_id,
+            change_set_id,
+            StagingRequest::StageFile { file_id },
+        )
+    }
+
+    pub fn unstage_file(
+        &self,
+        repository_id: &str,
+        change_set_id: &str,
+        file_id: &str,
+    ) -> Result<MutationReceipt, OrbitError> {
+        self.mutate_staging(
+            repository_id,
+            change_set_id,
+            StagingRequest::UnstageFile { file_id },
+        )
+    }
+
+    pub fn stage_all(
+        &self,
+        repository_id: &str,
+        change_set_id: &str,
+    ) -> Result<MutationReceipt, OrbitError> {
+        self.mutate_staging(repository_id, change_set_id, StagingRequest::StageAll)
+    }
+
+    pub fn unstage_all(
+        &self,
+        repository_id: &str,
+        change_set_id: &str,
+    ) -> Result<MutationReceipt, OrbitError> {
+        self.mutate_staging(repository_id, change_set_id, StagingRequest::UnstageAll)
+    }
+
+    fn mutate_staging(
+        &self,
+        repository_id: &str,
+        change_set_id: &str,
+        request: StagingRequest<'_>,
+    ) -> Result<MutationReceipt, OrbitError> {
+        // Reserve before blocking repository work so any older detailed-status
+        // worker has a lower generation than this mutation intent.
+        let generation = self.changes.reserve_refresh();
+        let root = self.authorized_root(repository_id)?;
+        self.runner.require_no_lazy_fetch()?;
+        let _lease = self.mutations.acquire(repository_id)?;
+
+        let authority = match request.file_id() {
+            Some(file_id) => {
+                let change_set =
+                    self.changes
+                        .authorize_change_set(repository_id, &root, change_set_id)?;
+                MutationAuthority::File {
+                    file: self.changes.authorize_file(
+                        repository_id,
+                        &root,
+                        change_set_id,
+                        file_id,
+                    )?,
+                    head: change_set.head,
+                }
+            }
+            None => MutationAuthority::All(self.changes.authorize_change_set(
+                repository_id,
+                &root,
+                change_set_id,
+            )?),
+        };
+        let pre_status = read_detailed_status(&self.runner, &root)?;
+        ensure_mutation_state_allowed(&self.runner, &root, &pre_status)?;
+        let prepared = prepare_mutation(request, &authority, &pre_status)?;
+
+        // This is the point of no return for handle authority. It atomically
+        // fences older refresh generations and retires every old file handle.
+        self.changes
+            .begin_mutation(repository_id, &root, change_set_id, generation)?;
+
+        let output = prepared.run(&self.runner, &root)?;
+        let post_status = read_detailed_status(&self.runner, &root);
+        let lock_remains = index_lock_exists(&self.runner, &root);
+        self.finish_staging_mutation(
+            repository_id,
+            &root,
+            generation,
+            prepared,
+            pre_status,
+            post_status,
+            output,
+            lock_remains,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_staging_mutation(
+        &self,
+        repository_id: &str,
+        root: &Path,
+        generation: crate::change_sets::ChangesRefreshGeneration,
+        prepared: PreparedMutation,
+        pre_status: StatusSnapshot,
+        post_status: Result<StatusSnapshot, OrbitError>,
+        output: GitMutationOutput,
+        lock_remains: bool,
+    ) -> Result<MutationReceipt, OrbitError> {
+        let operation = prepared.operation;
+        let post = post_status.ok();
+        let state_changed = post.as_ref().is_some_and(|post| post != &pre_status);
+        let expected_transition = post
+            .as_ref()
+            .is_some_and(|post| prepared.expected_transition(post));
+        let exited_successfully = output.termination == GitMutationTermination::Exited
+            && output
+                .status
+                .as_ref()
+                .is_some_and(|status| status.success());
+        let exited_with_rejection = output.termination == GitMutationTermination::Exited
+            && output
+                .status
+                .as_ref()
+                .is_some_and(|status| !status.success());
+
+        let outcome = if exited_successfully && expected_transition {
+            MutationOutcome::Applied
+        } else if exited_with_rejection && !state_changed {
+            MutationOutcome::Rejected
+        } else {
+            MutationOutcome::Uncertain
+        };
+
+        let head_changed = post
+            .as_ref()
+            .is_some_and(|post| post.head != pre_status.head);
+        if head_changed {
+            self.histories.invalidate_repository(repository_id)?;
+        }
+
+        let repository_changes = post.and_then(|post| {
+            self.changes
+                .install(
+                    repository_id,
+                    root,
+                    generation,
+                    post.head,
+                    post.working_tree,
+                    post.changes,
+                )
+                .ok()
+        });
+        let refresh_required = repository_changes.is_none();
+        let issue = mutation_issue(
+            operation,
+            outcome,
+            output.termination,
+            &output.stderr,
+            lock_remains,
+            refresh_required,
+        );
+
+        Ok(MutationReceipt {
+            operation,
+            outcome,
+            issue,
+            repository_changes,
+            refresh_required,
+            head_changed,
+        })
+    }
+
     fn authorized_root(&self, repository_id: &str) -> Result<PathBuf, OrbitError> {
         let root = self.registered_root(repository_id)?;
         self.revalidate_root(repository_id, &root)?;
@@ -204,6 +386,300 @@ impl RepositoryRegistry {
         let value = self.next_id.fetch_add(1, Ordering::Relaxed);
         format!("repository-{value:016x}")
     }
+}
+
+enum StagingRequest<'a> {
+    StageFile { file_id: &'a str },
+    UnstageFile { file_id: &'a str },
+    StageAll,
+    UnstageAll,
+}
+
+impl StagingRequest<'_> {
+    fn file_id(&self) -> Option<&str> {
+        match self {
+            Self::StageFile { file_id } | Self::UnstageFile { file_id } => Some(file_id),
+            Self::StageAll | Self::UnstageAll => None,
+        }
+    }
+}
+
+enum MutationAuthority {
+    File {
+        file: AuthorizedFile,
+        head: HeadSnapshot,
+    },
+    All(AuthorizedChangeSet),
+}
+
+struct PreparedMutation {
+    operation: MutationOperation,
+    paths: Vec<Vec<u8>>,
+    selected_path: Option<Vec<u8>>,
+    expected_kind: Option<ChangeKind>,
+    unborn: bool,
+}
+
+impl PreparedMutation {
+    fn run(&self, runner: &GitRunner, root: &Path) -> Result<GitMutationOutput, OrbitError> {
+        match self.operation {
+            MutationOperation::StageFile => run_stage_file(runner, root, &self.paths),
+            MutationOperation::UnstageFile => {
+                run_unstage_file(runner, root, &self.paths, self.unborn)
+            }
+            MutationOperation::StageAll => run_stage_all(runner, root),
+            MutationOperation::UnstageAll => run_unstage_all(runner, root, self.unborn),
+        }
+    }
+
+    fn expected_transition(&self, post: &StatusSnapshot) -> bool {
+        match self.operation {
+            MutationOperation::StageFile => {
+                let Some(path) = self.selected_path.as_ref() else {
+                    return false;
+                };
+                post.changes
+                    .iter()
+                    .find(|entry| &entry.path == path)
+                    .and_then(|entry| entry.staged.as_ref())
+                    .is_some_and(|facet| Some(facet.kind) == self.expected_kind)
+            }
+            MutationOperation::UnstageFile => {
+                let Some(path) = self.selected_path.as_ref() else {
+                    return false;
+                };
+                post.changes
+                    .iter()
+                    .find(|entry| &entry.path == path)
+                    .is_none_or(|entry| entry.staged.is_none())
+            }
+            MutationOperation::StageAll => {
+                post.working_tree.unstaged == 0
+                    && post.working_tree.untracked == 0
+                    && post.working_tree.conflicted == 0
+            }
+            MutationOperation::UnstageAll => post.working_tree.staged == 0,
+        }
+    }
+}
+
+fn prepare_mutation(
+    request: StagingRequest<'_>,
+    authority: &MutationAuthority,
+    fresh: &StatusSnapshot,
+) -> Result<PreparedMutation, OrbitError> {
+    match (request, authority) {
+        (StagingRequest::StageFile { .. }, MutationAuthority::File { file, head }) => {
+            if head != &fresh.head {
+                return Err(stale_mutation());
+            }
+            let fresh_file = compatible_fresh_file(file, fresh)?;
+            let facet = file.unstaged.as_ref().ok_or_else(|| {
+                OrbitError::mutation_not_applicable(
+                    "The selected file no longer has an unstaged change to stage.",
+                )
+            })?;
+            if fresh_file.unstaged.as_ref() != Some(facet) {
+                return Err(stale_mutation());
+            }
+            let expected_kind = if facet.kind == ChangeKind::Untracked {
+                ChangeKind::Added
+            } else {
+                facet.kind
+            };
+            Ok(PreparedMutation {
+                operation: MutationOperation::StageFile,
+                paths: selected_paths(file, facet.kind),
+                selected_path: Some(file.path.clone()),
+                expected_kind: Some(expected_kind),
+                unborn: fresh.head.oid.is_none(),
+            })
+        }
+        (StagingRequest::UnstageFile { .. }, MutationAuthority::File { file, head }) => {
+            if head != &fresh.head {
+                return Err(stale_mutation());
+            }
+            let fresh_file = compatible_fresh_file(file, fresh)?;
+            let facet = file.staged.as_ref().ok_or_else(|| {
+                OrbitError::mutation_not_applicable(
+                    "The selected file no longer has a staged change to unstage.",
+                )
+            })?;
+            if fresh_file.staged.as_ref() != Some(facet) {
+                return Err(stale_mutation());
+            }
+            let unborn = fresh.head.oid.is_none();
+            if unborn && facet.kind != ChangeKind::Added {
+                return Err(OrbitError::mutation_not_applicable(
+                    "Only a staged addition can be unstaged before the repository has its first commit.",
+                ));
+            }
+            Ok(PreparedMutation {
+                operation: MutationOperation::UnstageFile,
+                paths: selected_paths(file, facet.kind),
+                selected_path: Some(file.path.clone()),
+                expected_kind: None,
+                unborn,
+            })
+        }
+        (StagingRequest::StageAll, MutationAuthority::All(change_set)) => {
+            ensure_change_set_compatible(change_set, fresh)?;
+            if fresh.working_tree.unstaged == 0 && fresh.working_tree.untracked == 0 {
+                return Err(OrbitError::mutation_not_applicable(
+                    "There are no unstaged changes to stage.",
+                ));
+            }
+            Ok(PreparedMutation {
+                operation: MutationOperation::StageAll,
+                paths: Vec::new(),
+                selected_path: None,
+                expected_kind: None,
+                unborn: fresh.head.oid.is_none(),
+            })
+        }
+        (StagingRequest::UnstageAll, MutationAuthority::All(change_set)) => {
+            ensure_change_set_compatible(change_set, fresh)?;
+            if fresh.working_tree.staged == 0 {
+                return Err(OrbitError::mutation_not_applicable(
+                    "There are no staged changes to unstage.",
+                ));
+            }
+            Ok(PreparedMutation {
+                operation: MutationOperation::UnstageAll,
+                paths: Vec::new(),
+                selected_path: None,
+                expected_kind: None,
+                unborn: fresh.head.oid.is_none(),
+            })
+        }
+        _ => Err(OrbitError::internal(
+            "mutate_repository",
+            "The staging request did not match its authorization scope.",
+        )),
+    }
+}
+
+fn compatible_fresh_file<'a>(
+    selected: &AuthorizedFile,
+    fresh: &'a StatusSnapshot,
+) -> Result<&'a StatusEntry, OrbitError> {
+    let current = fresh
+        .changes
+        .iter()
+        .find(|entry| entry.path == selected.path)
+        .ok_or_else(stale_mutation)?;
+    if current.original_path != selected.original_path
+        || current.conflict != selected.conflict
+        || current.submodule != selected.submodule
+    {
+        return Err(stale_mutation());
+    }
+    if current.conflict.is_some() {
+        return Err(OrbitError::mutation_not_applicable(
+            "Conflict resolution is not part of the current staging workflow.",
+        ));
+    }
+    Ok(current)
+}
+
+fn ensure_change_set_compatible(
+    selected: &AuthorizedChangeSet,
+    fresh: &StatusSnapshot,
+) -> Result<(), OrbitError> {
+    if selected.head != fresh.head || selected.files.len() != fresh.changes.len() {
+        return Err(stale_mutation());
+    }
+    if selected
+        .files
+        .iter()
+        .zip(&fresh.changes)
+        .any(|(selected, fresh)| !same_file_state(selected, fresh))
+    {
+        return Err(stale_mutation());
+    }
+    Ok(())
+}
+
+fn same_file_state(selected: &AuthorizedFile, fresh: &StatusEntry) -> bool {
+    selected.path == fresh.path
+        && selected.original_path == fresh.original_path
+        && selected.staged == fresh.staged
+        && selected.unstaged == fresh.unstaged
+        && selected.conflict == fresh.conflict
+        && selected.submodule == fresh.submodule
+}
+
+fn selected_paths(file: &AuthorizedFile, kind: ChangeKind) -> Vec<Vec<u8>> {
+    let mut paths = vec![file.path.clone()];
+    if kind == ChangeKind::Renamed {
+        if let Some(original) = file.original_path.clone() {
+            paths.push(original);
+        }
+    }
+    paths
+}
+
+fn stale_mutation() -> OrbitError {
+    OrbitError::mutation_stale(
+        "The repository changed after this change list was loaded. Refresh before trying again.",
+    )
+}
+
+fn mutation_issue(
+    operation: MutationOperation,
+    outcome: MutationOutcome,
+    termination: GitMutationTermination,
+    stderr: &[u8],
+    lock_remains: bool,
+    refresh_required: bool,
+) -> Option<OrbitError> {
+    let operation_name = match operation {
+        MutationOperation::StageFile => "stage_file",
+        MutationOperation::UnstageFile => "unstage_file",
+        MutationOperation::StageAll => "stage_all",
+        MutationOperation::UnstageAll => "unstage_all",
+    };
+    if outcome == MutationOutcome::Rejected {
+        return Some(OrbitError::mutation_rejected(
+            operation_name,
+            stderr,
+            lock_remains,
+        ));
+    }
+    if outcome == MutationOutcome::Uncertain {
+        let (code, message) = match termination {
+            GitMutationTermination::TimedOut => (
+                "mutation_timed_out",
+                "Git exceeded Orbit's staging deadline. Repository state was refreshed where possible; do not retry until it is inspected.",
+            ),
+            GitMutationTermination::OutputTooLarge => (
+                "mutation_outcome_uncertain",
+                "Git produced more output than Orbit retains. Inspect the refreshed repository state before retrying.",
+            ),
+            GitMutationTermination::Exited | GitMutationTermination::RunnerFailed => (
+                "mutation_outcome_uncertain",
+                "Orbit could not prove that the requested index transition completed. Inspect the refreshed repository state before retrying.",
+            ),
+        };
+        return Some(OrbitError::mutation_uncertain(
+            code,
+            operation_name,
+            message,
+            stderr,
+            lock_remains,
+        ));
+    }
+    if refresh_required {
+        return Some(OrbitError::post_mutation_refresh_failed(operation_name));
+    }
+    if !stderr.is_empty() || lock_remains {
+        return Some(OrbitError::mutation_warning(
+            operation_name,
+            stderr,
+            lock_remains,
+        ));
+    }
+    None
 }
 
 fn diff_selection(file: AuthorizedFile) -> DiffSelection {
@@ -343,9 +819,17 @@ fn build_snapshot(
 mod tests {
     use std::{
         collections::HashSet,
-        sync::atomic::{AtomicU64, Ordering},
-        time::{SystemTime, UNIX_EPOCH},
+        ffi::{OsStr, OsString},
+        sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc,
+        },
+        thread,
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
+
+    #[cfg(unix)]
+    use std::os::unix::{ffi::OsStringExt, fs::PermissionsExt};
 
     use crate::git::{
         history_starting_tips, read_graph_commit_page, read_graph_order, read_object_format,
@@ -383,6 +867,10 @@ mod tests {
 
         fn write(&self, path: &str, contents: &str) {
             fs::write(self.root.join(path), contents).expect("write fixture");
+        }
+
+        fn write_path(&self, path: &Path, contents: &[u8]) {
+            fs::write(self.root.join(path), contents).expect("write byte-path fixture");
         }
 
         fn commit_file(&self, path: &str, contents: &str, message: &str) {
@@ -430,8 +918,34 @@ mod tests {
                 .to_owned()
         }
 
+        fn git_bytes<I, S>(&self, args: I) -> Vec<u8>
+        where
+            I: IntoIterator<Item = S>,
+            S: AsRef<OsStr>,
+        {
+            let output = GitRunner::default()
+                .run(Some(&self.root), "test_fixture", args, 1024 * 1024)
+                .expect("run byte-safe fixture git command");
+            assert!(output.status.success(), "fixture Git command failed");
+            output.stdout
+        }
+
         fn oid(&self, revision: &str) -> String {
             self.git_output(["rev-parse", "--verify", revision])
+        }
+
+        fn git_path(&self, name: &str) -> PathBuf {
+            let path = PathBuf::from(self.git_output([
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-path",
+                name,
+            ]));
+            if path.is_absolute() {
+                path
+            } else {
+                self.root.join(path)
+            }
         }
 
         fn git_failure<const N: usize>(&self, args: [&str; N]) {
@@ -446,6 +960,27 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.root).expect("remove test repository");
         }
+    }
+
+    fn changed_file<'a>(
+        changes: &'a RepositoryChanges,
+        display_path: &str,
+    ) -> &'a crate::change_sets::ChangedFile {
+        changes
+            .files
+            .iter()
+            .find(|file| file.path.text == display_path)
+            .unwrap_or_else(|| panic!("missing change entry for {display_path:?}"))
+    }
+
+    fn wait_for_path(path: &Path) {
+        for _ in 0..300 {
+            if path.exists() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("timed out waiting for {}", path.display());
     }
 
     #[test]
@@ -2484,5 +3019,933 @@ mod tests {
 
         assert_eq!(error.code, "git_command_failed");
         assert!(!marker.exists(), "promisor remote must not execute");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stages_supported_file_facets_and_installs_fresh_change_sets() {
+        use std::os::unix::fs::symlink;
+
+        let repository = TestRepository::new();
+        for path in ["mixed.txt", "deleted.txt", "type.txt"] {
+            repository.write(path, "base\n");
+        }
+        repository.git_ok(["add", "--all"]);
+        repository.git_ok(["commit", "-m", "Base"]);
+
+        repository.write("mixed.txt", "staged\n");
+        repository.git_ok(["add", "--", "mixed.txt"]);
+        repository.write("mixed.txt", "staged and unstaged\n");
+        fs::remove_file(repository.root.join("deleted.txt")).expect("delete tracked fixture");
+        fs::remove_file(repository.root.join("type.txt")).expect("replace tracked fixture");
+        symlink("target", repository.root.join("type.txt")).expect("create type-change symlink");
+        repository.write("untracked.txt", "new\n");
+        symlink("target", repository.root.join("new-link")).expect("create new symlink");
+
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open fixture");
+        let mut changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("initial detailed changes");
+        let original_change_set = changes.change_set_id.as_str().to_owned();
+        let original_file = changed_file(&changes, "mixed.txt")
+            .file_id
+            .as_str()
+            .to_owned();
+
+        for path in [
+            "mixed.txt",
+            "deleted.txt",
+            "type.txt",
+            "untracked.txt",
+            "new-link",
+        ] {
+            let file = changed_file(&changes, path);
+            let receipt = registry
+                .stage_file(
+                    &opened.repository_id,
+                    changes.change_set_id.as_str(),
+                    file.file_id.as_str(),
+                )
+                .unwrap_or_else(|error| panic!("stage {path:?}: {error:?}"));
+            assert_eq!(receipt.outcome, MutationOutcome::Applied, "stage {path:?}");
+            assert!(!receipt.refresh_required);
+            changes = receipt
+                .repository_changes
+                .expect("successful stage installs detailed changes");
+        }
+
+        assert_eq!(changes.summary.unstaged, 0);
+        assert_eq!(changes.summary.untracked, 0);
+        assert_eq!(changes.summary.staged, 5);
+        let stale = registry
+            .stage_file(&opened.repository_id, &original_change_set, &original_file)
+            .expect_err("pre-mutation handles must remain retired");
+        assert_eq!(stale.code, "change_set_unavailable");
+    }
+
+    #[test]
+    fn literal_stage_file_supports_option_pathspec_and_control_names() {
+        let repository = TestRepository::new();
+        let names = [
+            "*.txt",
+            ":(glob)magic.txt",
+            "-leading.txt",
+            "space name.txt",
+            "unicodé.txt",
+            "tab\tname.txt",
+            "line\nbreak.txt",
+        ];
+        for name in names {
+            repository.write(name, "selected\n");
+        }
+        repository.write("other.txt", "must remain untracked\n");
+
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open fixture");
+        let mut changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("read unusual changes");
+        let displays = [
+            "*.txt",
+            ":(glob)magic.txt",
+            "-leading.txt",
+            "space name.txt",
+            "unicodé.txt",
+            "tab\\tname.txt",
+            "line\\nbreak.txt",
+        ];
+
+        for display in displays {
+            let file = changed_file(&changes, display);
+            let receipt = registry
+                .stage_file(
+                    &opened.repository_id,
+                    changes.change_set_id.as_str(),
+                    file.file_id.as_str(),
+                )
+                .unwrap_or_else(|error| panic!("stage {display:?}: {error:?}"));
+            assert_eq!(receipt.outcome, MutationOutcome::Applied);
+            changes = receipt.repository_changes.expect("fresh change set");
+        }
+
+        let other = changed_file(&changes, "other.txt");
+        assert_eq!(
+            other.unstaged.as_ref().map(|facet| facet.kind),
+            Some(ChangeKind::Untracked)
+        );
+        assert!(other.staged.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stage_file_preserves_invalid_utf8_path_authority_inside_rust() {
+        let repository = TestRepository::new();
+        let raw = b"invalid-\xff.txt".to_vec();
+        let path = PathBuf::from(OsString::from_vec(raw.clone()));
+        repository.write_path(&path, b"content\n");
+
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open fixture");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("read byte path");
+        let file = changes
+            .files
+            .iter()
+            .find(|file| file.path.text == "invalid-\\xFF.txt")
+            .expect("escaped byte path");
+        let receipt = registry
+            .stage_file(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                file.file_id.as_str(),
+            )
+            .expect("stage invalid UTF-8 path");
+        assert_eq!(receipt.outcome, MutationOutcome::Applied);
+
+        let listed = repository.git_bytes([OsString::from("ls-files"), OsString::from("-z")]);
+        let mut expected = raw;
+        expected.push(0);
+        assert_eq!(listed, expected);
+    }
+
+    #[test]
+    fn born_and_unborn_unstage_file_and_all_preserve_worktree_content() {
+        let born = TestRepository::new();
+        born.commit_file("tracked.txt", "base\n", "Base");
+        born.write("tracked.txt", "staged\n");
+        born.git_ok(["add", "--", "tracked.txt"]);
+        born.write("tracked.txt", "later worktree edit\n");
+        born.write("added.txt", "added\n");
+        born.git_ok(["add", "--", "added.txt"]);
+        let born_registry = RepositoryRegistry::default();
+        let opened = born_registry
+            .open(born.root.clone())
+            .expect("open born fixture");
+        let changes = born_registry
+            .repository_changes(&opened.repository_id)
+            .expect("born changes");
+        let tracked = changed_file(&changes, "tracked.txt");
+        let receipt = born_registry
+            .unstage_file(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                tracked.file_id.as_str(),
+            )
+            .expect("unstage mixed tracked file");
+        assert_eq!(receipt.outcome, MutationOutcome::Applied);
+        assert_eq!(
+            fs::read_to_string(born.root.join("tracked.txt")).expect("worktree content"),
+            "later worktree edit\n"
+        );
+        let changes = receipt.repository_changes.expect("fresh born changes");
+        let receipt = born_registry
+            .unstage_all(&opened.repository_id, changes.change_set_id.as_str())
+            .expect("unstage all born");
+        assert_eq!(receipt.outcome, MutationOutcome::Applied);
+        let changes = receipt.repository_changes.expect("fresh born changes");
+        assert_eq!(changes.summary.staged, 0);
+        assert!(born.root.join("added.txt").exists());
+
+        let unborn = TestRepository::new();
+        unborn.write("one.txt", "one\n");
+        unborn.write("two.txt", "two\n");
+        unborn.git_ok(["add", "--all"]);
+        let unborn_registry = RepositoryRegistry::default();
+        let opened = unborn_registry
+            .open(unborn.root.clone())
+            .expect("open unborn fixture");
+        let changes = unborn_registry
+            .repository_changes(&opened.repository_id)
+            .expect("unborn changes");
+        let one = changed_file(&changes, "one.txt");
+        let receipt = unborn_registry
+            .unstage_file(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                one.file_id.as_str(),
+            )
+            .expect("unborn unstage file");
+        assert_eq!(receipt.outcome, MutationOutcome::Applied);
+        assert!(unborn.root.join("one.txt").exists());
+        let changes = receipt.repository_changes.expect("fresh unborn changes");
+        let receipt = unborn_registry
+            .unstage_all(&opened.repository_id, changes.change_set_id.as_str())
+            .expect("unborn unstage all");
+        assert_eq!(receipt.outcome, MutationOutcome::Applied);
+        assert_eq!(
+            receipt
+                .repository_changes
+                .expect("fresh empty index")
+                .summary
+                .staged,
+            0
+        );
+        assert!(unborn.root.join("two.txt").exists());
+    }
+
+    #[test]
+    fn stage_all_includes_add_modify_delete_and_rejects_stale_structure() {
+        let repository = TestRepository::new();
+        repository.commit_file("modified.txt", "base\n", "Base");
+        repository.write("deleted.txt", "base\n");
+        repository.git_ok(["add", "--", "deleted.txt"]);
+        repository.git_ok(["commit", "-m", "Second base"]);
+        repository.write("modified.txt", "changed\n");
+        fs::remove_file(repository.root.join("deleted.txt")).expect("delete fixture");
+        repository.write("new.txt", "new\n");
+
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open fixture");
+        let stale = registry
+            .repository_changes(&opened.repository_id)
+            .expect("stale candidate");
+        repository.write("appeared-later.txt", "late\n");
+        let error = registry
+            .stage_all(&opened.repository_id, stale.change_set_id.as_str())
+            .expect_err("structural change must reject stale stage all");
+        assert_eq!(error.code, "mutation_stale");
+
+        let current = registry
+            .repository_changes(&opened.repository_id)
+            .expect("fresh changes");
+        let receipt = registry
+            .stage_all(&opened.repository_id, current.change_set_id.as_str())
+            .expect("stage all");
+        assert_eq!(receipt.outcome, MutationOutcome::Applied);
+        let changes = receipt.repository_changes.expect("fresh staged state");
+        assert_eq!(changes.summary.unstaged, 0);
+        assert_eq!(changes.summary.untracked, 0);
+        assert_eq!(changes.summary.staged, 4);
+    }
+
+    #[test]
+    fn file_mutation_rejects_external_structure_changes_before_start() {
+        let repository = TestRepository::new();
+        repository.commit_file("tracked.txt", "base\n", "Base");
+        repository.write("tracked.txt", "changed\n");
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open fixture");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("read changes");
+        let file = changed_file(&changes, "tracked.txt");
+        fs::rename(
+            repository.root.join("tracked.txt"),
+            repository.root.join("renamed.txt"),
+        )
+        .expect("rename outside Orbit");
+
+        let error = registry
+            .stage_file(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                file.file_id.as_str(),
+            )
+            .expect_err("structurally stale file must reject");
+        assert_eq!(error.code, "mutation_stale");
+        registry
+            .changes
+            .authorize_for_test(
+                &opened.repository_id,
+                &repository.root,
+                changes.change_set_id.as_str(),
+                file.file_id.as_str(),
+            )
+            .expect("pre-start rejection must preserve old authority");
+    }
+
+    #[test]
+    fn file_mutation_rejects_head_movement_even_when_its_facet_is_unchanged() {
+        let repository = TestRepository::new();
+        repository.commit_file("tracked.txt", "base\n", "Base");
+        repository.write("tracked.txt", "changed\n");
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open fixture");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("read changes");
+        let file = changed_file(&changes, "tracked.txt");
+        repository.write("external.txt", "external\n");
+        repository.git_ok(["add", "--", "external.txt"]);
+        repository.git_ok(["commit", "-m", "External commit"]);
+
+        let error = registry
+            .stage_file(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                file.file_id.as_str(),
+            )
+            .expect_err("HEAD movement must invalidate mutation preflight");
+        assert_eq!(error.code, "mutation_stale");
+    }
+
+    #[test]
+    fn stage_all_supports_an_unborn_repository() {
+        let repository = TestRepository::new();
+        repository.write("first.txt", "first\n");
+        repository.write("second.txt", "second\n");
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open unborn fixture");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("unborn changes");
+        let receipt = registry
+            .stage_all(&opened.repository_id, changes.change_set_id.as_str())
+            .expect("stage all unborn");
+        assert_eq!(receipt.outcome, MutationOutcome::Applied);
+        let post = receipt.repository_changes.expect("fresh unborn state");
+        assert_eq!(post.summary.staged, 2);
+        assert_eq!(post.summary.untracked, 0);
+        assert!(post.head.oid.is_none());
+    }
+
+    #[test]
+    fn unstage_rename_uses_both_endpoints_and_copy_keeps_its_source_staged() {
+        let rename = TestRepository::new();
+        rename.commit_file("old.txt", "base\n", "Base");
+        rename.git_ok(["mv", "old.txt", "new.txt"]);
+        let rename_registry = RepositoryRegistry::default();
+        let opened = rename_registry
+            .open(rename.root.clone())
+            .expect("open rename");
+        let changes = rename_registry
+            .repository_changes(&opened.repository_id)
+            .expect("rename changes");
+        let target = changed_file(&changes, "new.txt");
+        assert_eq!(
+            target.staged.as_ref().map(|facet| facet.kind),
+            Some(ChangeKind::Renamed)
+        );
+        let receipt = rename_registry
+            .unstage_file(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                target.file_id.as_str(),
+            )
+            .expect("unstage rename");
+        assert_eq!(receipt.outcome, MutationOutcome::Applied);
+        let post = receipt.repository_changes.expect("fresh rename state");
+        assert_eq!(post.summary.staged, 0);
+        assert!(rename.root.join("new.txt").exists());
+
+        let copy = TestRepository::new();
+        copy.commit_file("source.txt", "base\n", "Base");
+        copy.write("source.txt", "source changed\n");
+        copy.write("copy.txt", "base\n");
+        copy.git_ok(["add", "--", "source.txt", "copy.txt"]);
+        let copy_registry = RepositoryRegistry::default();
+        let opened = copy_registry.open(copy.root.clone()).expect("open copy");
+        let changes = copy_registry
+            .repository_changes(&opened.repository_id)
+            .expect("copy changes");
+        let copied = changed_file(&changes, "copy.txt");
+        assert_eq!(
+            copied.staged.as_ref().map(|facet| facet.kind),
+            Some(ChangeKind::Copied)
+        );
+        let receipt = copy_registry
+            .unstage_file(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                copied.file_id.as_str(),
+            )
+            .expect("unstage copy target");
+        assert_eq!(receipt.outcome, MutationOutcome::Applied);
+        let post = receipt.repository_changes.expect("fresh copy state");
+        assert!(changed_file(&post, "source.txt").staged.is_some());
+        assert!(changed_file(&post, "copy.txt").staged.is_none());
+    }
+
+    #[test]
+    fn staging_a_submodule_updates_only_the_superproject_gitlink() {
+        let source = TestRepository::new();
+        source.commit_file("nested.txt", "base\n", "Nested base");
+        let repository = TestRepository::new();
+        repository.git_ok([
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            source.root.to_str().expect("UTF-8 source path"),
+            "sub",
+        ]);
+        repository.git_ok(["commit", "-m", "Add submodule"]);
+        let submodule = repository.root.join("sub");
+        let run_in_submodule = |args: &[&str]| {
+            let output = GitRunner::default()
+                .run(Some(&submodule), "test_fixture", args, 1024 * 1024)
+                .expect("run submodule Git");
+            assert!(
+                output.status.success(),
+                "submodule Git failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run_in_submodule(&["config", "user.name", "Orbit Tests"]);
+        run_in_submodule(&["config", "user.email", "orbit@example.test"]);
+        fs::write(submodule.join("nested.txt"), b"new commit\n").expect("write nested commit");
+        run_in_submodule(&["add", "--", "nested.txt"]);
+        run_in_submodule(&["commit", "-m", "Advance submodule"]);
+        fs::write(submodule.join("nested.txt"), b"dirty after commit\n").expect("dirty submodule");
+
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open superproject");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("read gitlink change");
+        let file = changed_file(&changes, "sub");
+        assert!(file
+            .submodule
+            .as_ref()
+            .is_some_and(|state| state.commit_changed));
+        let receipt = registry
+            .stage_file(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                file.file_id.as_str(),
+            )
+            .expect("stage superproject gitlink");
+        assert_eq!(receipt.outcome, MutationOutcome::Applied);
+        let nested_status = GitRunner::default()
+            .run(
+                Some(&submodule),
+                "test_fixture",
+                ["status", "--porcelain"],
+                1024,
+            )
+            .expect("read nested status");
+        assert!(
+            !nested_status.stdout.is_empty(),
+            "nested dirty worktree must not be staged recursively"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_stage_runs_filters_and_index_hook_but_neutralizes_fsmonitor() {
+        let repository = TestRepository::new();
+        repository.write(".gitattributes", "tracked.txt filter=orbit-stage\n");
+        repository.write("tracked.txt", "base\n");
+        repository.git_ok(["add", "--", ".gitattributes", "tracked.txt"]);
+        repository.git_ok(["commit", "-m", "Base"]);
+
+        let filter_marker = repository.root.join("filter-ran");
+        let fsmonitor_marker = repository.root.join("fsmonitor-ran");
+        let hook_marker = repository.root.join("hook-ran");
+        let filter = repository.root.join("filter.sh");
+        fs::write(
+            &filter,
+            format!("#!/bin/sh\n: > '{}'\ncat\n", filter_marker.display()),
+        )
+        .expect("write filter");
+        let fsmonitor = repository.root.join("fsmonitor.sh");
+        fs::write(
+            &fsmonitor,
+            format!("#!/bin/sh\n: > '{}'\nexit 0\n", fsmonitor_marker.display()),
+        )
+        .expect("write fsmonitor");
+        let hook = repository.root.join(".git/hooks/post-index-change");
+        fs::write(
+            &hook,
+            format!("#!/bin/sh\n: > '{}'\n", hook_marker.display()),
+        )
+        .expect("write hook");
+        for executable in [&filter, &fsmonitor, &hook] {
+            let mut permissions = fs::metadata(executable).expect("metadata").permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(executable, permissions).expect("make executable");
+        }
+        repository.git_ok([
+            "config",
+            "filter.orbit-stage.clean",
+            filter.to_str().expect("UTF-8 filter path"),
+        ]);
+        repository.git_ok([
+            "config",
+            "core.fsmonitor",
+            fsmonitor.to_str().expect("UTF-8 fsmonitor path"),
+        ]);
+        repository.write("tracked.txt", "changed\n");
+
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open fixture");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("read changes");
+        assert!(!filter_marker.exists());
+        assert!(!fsmonitor_marker.exists());
+        assert!(!hook_marker.exists());
+        let file = changed_file(&changes, "tracked.txt");
+        let receipt = registry
+            .stage_file(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                file.file_id.as_str(),
+            )
+            .expect("stage with configured helpers");
+
+        assert_eq!(receipt.outcome, MutationOutcome::Applied);
+        assert!(
+            filter_marker.exists(),
+            "explicit stage should execute clean filter"
+        );
+        assert!(
+            hook_marker.exists(),
+            "explicit stage should execute index hook"
+        );
+        assert!(
+            !fsmonitor_marker.exists(),
+            "fsmonitor must remain neutralized"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn required_process_filter_rejection_is_typed_and_refreshes_state() {
+        let repository = TestRepository::new();
+        repository.write(".gitattributes", "tracked.txt filter=orbit-process\n");
+        repository.write("tracked.txt", "base\n");
+        repository.git_ok(["add", "--", ".gitattributes", "tracked.txt"]);
+        repository.git_ok(["commit", "-m", "Base"]);
+        let marker = repository.root.join(".git/process-filter-ran");
+        let process = repository.root.join("process-filter.sh");
+        fs::write(
+            &process,
+            format!(
+                "#!/bin/sh\n: > '{}'\nprintf 'required process filter rejected\\n' >&2\nexit 1\n",
+                marker.display()
+            ),
+        )
+        .expect("write process filter");
+        let mut permissions = fs::metadata(&process).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&process, permissions).expect("make process executable");
+        repository.git_ok([
+            "config",
+            "filter.orbit-process.process",
+            process.to_str().expect("UTF-8 process path"),
+        ]);
+        repository.git_ok(["config", "filter.orbit-process.required", "true"]);
+        repository.write("tracked.txt", "changed\n");
+
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open fixture");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("read changes");
+        let file = changed_file(&changes, "tracked.txt");
+        let receipt = registry
+            .stage_file(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                file.file_id.as_str(),
+            )
+            .expect("started stage returns receipt");
+
+        assert_eq!(receipt.outcome, MutationOutcome::Rejected);
+        assert_eq!(
+            receipt.issue.as_ref().map(|issue| issue.code),
+            Some("mutation_rejected")
+        );
+        assert!(receipt
+            .issue
+            .as_ref()
+            .and_then(|issue| issue.details.as_deref())
+            .is_some_and(|detail| detail.contains("required process filter rejected")));
+        assert!(receipt.repository_changes.is_some());
+        assert!(!receipt.refresh_required);
+        assert!(
+            marker.exists(),
+            "explicit mutation should invoke process filter"
+        );
+        let stale = registry
+            .stage_file(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                file.file_id.as_str(),
+            )
+            .expect_err("failed started mutation still retires old handles");
+        assert_eq!(stale.code, "change_set_unavailable");
+    }
+
+    #[test]
+    fn conflict_and_in_progress_operation_reject_before_handle_fencing() {
+        let conflict = TestRepository::new();
+        conflict.commit_file("conflict.txt", "base\n", "Base");
+        conflict.git_ok(["checkout", "-b", "feature"]);
+        conflict.commit_file("conflict.txt", "feature\n", "Feature");
+        conflict.git_ok(["checkout", "main"]);
+        conflict.commit_file("conflict.txt", "main\n", "Main");
+        conflict.git_failure(["merge", "feature"]);
+        let registry = RepositoryRegistry::default();
+        let opened = registry.open(conflict.root.clone()).expect("open conflict");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("conflict changes");
+        let error = registry
+            .stage_all(&opened.repository_id, changes.change_set_id.as_str())
+            .expect_err("conflict staging is deferred");
+        assert_eq!(error.code, "mutation_not_applicable");
+        let conflict_file = changed_file(&changes, "conflict.txt");
+        registry
+            .changes
+            .authorize_for_test(
+                &opened.repository_id,
+                &conflict.root,
+                changes.change_set_id.as_str(),
+                conflict_file.file_id.as_str(),
+            )
+            .expect("preflight rejection keeps handles authoritative");
+
+        let merge = TestRepository::new();
+        merge.commit_file("base.txt", "base\n", "Base");
+        merge.git_ok(["checkout", "-b", "feature"]);
+        merge.commit_file("feature.txt", "feature\n", "Feature");
+        merge.git_ok(["checkout", "main"]);
+        merge.commit_file("main.txt", "main\n", "Main");
+        merge.git_ok(["merge", "--no-commit", "feature"]);
+        let registry = RepositoryRegistry::default();
+        let opened = registry.open(merge.root.clone()).expect("open merge");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("merge changes");
+        let error = registry
+            .unstage_all(&opened.repository_id, changes.change_set_id.as_str())
+            .expect_err("merge continuation is deferred");
+        assert_eq!(error.code, "mutation_not_applicable");
+    }
+
+    #[test]
+    fn every_fixed_pseudoref_and_git_state_path_blocks_staging() {
+        let repository = TestRepository::new();
+        repository.commit_file("tracked.txt", "base\n", "Base");
+        repository.write("untracked.txt", "new\n");
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open fixture");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("read changes");
+        let head = repository.oid("HEAD");
+
+        for reference in [
+            "MERGE_HEAD",
+            "CHERRY_PICK_HEAD",
+            "REVERT_HEAD",
+            "REBASE_HEAD",
+        ] {
+            let path = repository.git_path(reference);
+            fs::create_dir_all(path.parent().expect("pseudoref parent")).expect("create parent");
+            fs::write(&path, format!("{head}\n")).expect("write pseudoref");
+            let error = registry
+                .stage_all(&opened.repository_id, changes.change_set_id.as_str())
+                .expect_err("pseudoref must block staging");
+            assert_eq!(error.code, "mutation_not_applicable", "{reference}");
+            fs::remove_file(path).expect("remove pseudoref");
+        }
+
+        for state in ["rebase-merge", "rebase-apply", "sequencer", "SQUASH_MSG"] {
+            let path = repository.git_path(state);
+            if state == "SQUASH_MSG" {
+                fs::create_dir_all(path.parent().expect("state parent")).expect("create parent");
+                fs::write(&path, b"squash\n").expect("write state file");
+            } else {
+                fs::create_dir_all(&path).expect("create state directory");
+            }
+            let error = registry
+                .stage_all(&opened.repository_id, changes.change_set_id.as_str())
+                .expect_err("operation-state path must block staging");
+            assert_eq!(error.code, "mutation_not_applicable", "{state}");
+            if path.is_dir() {
+                fs::remove_dir_all(path).expect("remove state directory");
+            } else {
+                fs::remove_file(path).expect("remove state file");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_repository_concurrent_mutation_is_rejected_by_backend_lease() {
+        let repository = TestRepository::new();
+        repository.write(".gitattributes", "tracked.txt filter=orbit-blocking\n");
+        repository.write("tracked.txt", "base\n");
+        repository.git_ok(["add", "--", ".gitattributes", "tracked.txt"]);
+        repository.git_ok(["commit", "-m", "Base"]);
+        let entered = repository.root.join("filter-entered");
+        let release = repository.root.join("filter-release");
+        let filter = repository.root.join("blocking-filter.sh");
+        fs::write(
+            &filter,
+            format!(
+                "#!/bin/sh\n: > '{}'\nwhile [ ! -e '{}' ]; do sleep 0.01; done\ncat\n",
+                entered.display(),
+                release.display()
+            ),
+        )
+        .expect("write blocking filter");
+        let mut permissions = fs::metadata(&filter).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&filter, permissions).expect("make filter executable");
+        repository.git_ok([
+            "config",
+            "filter.orbit-blocking.clean",
+            filter.to_str().expect("UTF-8 filter path"),
+        ]);
+        repository.write("tracked.txt", "changed\n");
+
+        let registry = Arc::new(RepositoryRegistry::default());
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open fixture");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("read changes");
+        let file_id = changed_file(&changes, "tracked.txt")
+            .file_id
+            .as_str()
+            .to_owned();
+        let repository_id = opened.repository_id.clone();
+        let change_set_id = changes.change_set_id.as_str().to_owned();
+        let worker_registry = Arc::clone(&registry);
+        let worker_repository = repository_id.clone();
+        let worker_change_set = change_set_id.clone();
+        let worker_file = file_id.clone();
+        let worker = thread::spawn(move || {
+            worker_registry.stage_file(&worker_repository, &worker_change_set, &worker_file)
+        });
+        wait_for_path(&entered);
+
+        let error = registry
+            .stage_file(&repository_id, &change_set_id, &file_id)
+            .expect_err("concurrent mutation should be busy");
+        assert_eq!(error.code, "mutation_in_progress");
+        fs::write(&release, b"continue\n").expect("release filter");
+        let receipt = worker
+            .join()
+            .expect("mutation worker")
+            .expect("first stage");
+        assert_eq!(receipt.outcome, MutationOutcome::Applied);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn post_index_timeout_is_uncertain_but_returns_the_actual_staged_state() {
+        let repository = TestRepository::new();
+        repository.commit_file("tracked.txt", "base\n", "Base");
+        let entered = repository.root.join("hook-entered");
+        let hook = repository.root.join(".git/hooks/post-index-change");
+        fs::write(
+            &hook,
+            format!("#!/bin/sh\n: > '{}'\nsleep 30\n", entered.display()),
+        )
+        .expect("write slow index hook");
+        let mut permissions = fs::metadata(&hook).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&hook, permissions).expect("make hook executable");
+        repository.write("tracked.txt", "changed\n");
+
+        let runner = GitRunner::default().with_mutation_deadline(Duration::from_millis(200));
+        let registry = RepositoryRegistry::with_runner(runner);
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open fixture");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("read changes");
+        let file = changed_file(&changes, "tracked.txt");
+        let receipt = registry
+            .stage_file(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                file.file_id.as_str(),
+            )
+            .expect("timed-out started mutation returns receipt");
+
+        assert!(entered.exists());
+        assert_eq!(receipt.outcome, MutationOutcome::Uncertain);
+        assert_eq!(
+            receipt.issue.as_ref().map(|issue| issue.code),
+            Some("mutation_timed_out")
+        );
+        let post = receipt
+            .repository_changes
+            .expect("post-timeout status should still install");
+        assert_eq!(post.summary.staged, 1);
+        assert_eq!(post.summary.unstaged, 0);
+        assert!(!receipt.refresh_required);
+        let stale = registry
+            .stage_file(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                file.file_id.as_str(),
+            )
+            .expect_err("uncertain mutation must retire old handles");
+        assert_eq!(stale.code, "change_set_unavailable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unexpected_head_movement_from_index_hook_invalidates_history() {
+        let repository = TestRepository::new();
+        repository.commit_file("tracked.txt", "base\n", "Base");
+        repository.commit_file("second.txt", "second\n", "Second");
+        repository.write("tracked.txt", "changed\n");
+        let hook = repository.root.join(".git/hooks/post-index-change");
+        fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\nrm -- '{}'\ngit commit --quiet -m 'Hook commit'\n",
+                hook.display()
+            ),
+        )
+        .expect("write committing hook");
+        let mut permissions = fs::metadata(&hook).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&hook, permissions).expect("make hook executable");
+
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open fixture");
+        let history = registry
+            .commit_history_page(&opened.repository_id, None, Some(1))
+            .expect("start history session");
+        let cursor = history.next_cursor.expect("history cursor");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("read changes");
+        let file = changed_file(&changes, "tracked.txt");
+        let receipt = registry
+            .stage_file(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                file.file_id.as_str(),
+            )
+            .expect("stage with committing hook");
+
+        assert_eq!(receipt.outcome, MutationOutcome::Uncertain);
+        assert!(receipt.head_changed);
+        let history_error = registry
+            .commit_history_page(&opened.repository_id, Some(cursor.as_str()), Some(1))
+            .expect_err("HEAD movement must invalidate old history sessions");
+        assert_eq!(history_error.code, "history_session_unavailable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forcing_add_ignore_errors_false_prevents_configured_partial_stage_all() {
+        let repository = TestRepository::new();
+        repository.write("readable.txt", "readable\n");
+        repository.write("unreadable.txt", "unreadable\n");
+        let unreadable = repository.root.join("unreadable.txt");
+        let mut permissions = fs::metadata(&unreadable).expect("metadata").permissions();
+        permissions.set_mode(0o000);
+        fs::set_permissions(&unreadable, permissions).expect("make unreadable");
+        repository.git_ok(["config", "add.ignoreErrors", "true"]);
+
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open fixture");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("read changes");
+        let receipt = registry
+            .stage_all(&opened.repository_id, changes.change_set_id.as_str())
+            .expect("started stage all returns receipt");
+
+        permissions = fs::metadata(&unreadable).expect("metadata").permissions();
+        permissions.set_mode(0o644);
+        fs::set_permissions(&unreadable, permissions).expect("restore permissions");
+        assert_eq!(receipt.outcome, MutationOutcome::Rejected);
+        let cached = repository.git_output(["diff", "--cached", "--name-only"]);
+        assert!(
+            cached.is_empty(),
+            "fail-fast override must prevent partial staging"
+        );
     }
 }

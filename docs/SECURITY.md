@@ -319,6 +319,15 @@ fresh semantic status installation; HEAD movement also invalidates history sessi
 never regain authority merely because a hook or refresh failed. No Tauri capability expansion is
 approved.
 
+M3-B1 implements only `stage_file`, `unstage_file`, `stage_all`, and `unstage_all`. File commands
+require the opaque repository/change-set/file tuple; whole-index commands require the repository
+and current change-set IDs. The WebView receives a typed applied/rejected/uncertain receipt and an
+optional replacement change set, never a path or process control. The Unix process-group signal
+binding is internal to `GitRunner`; it does not add an IPC or Tauri capability. Regression tests
+cover inherited `GIT_*` scrubbing, literal byte paths, filter/index-hook execution after explicit
+intent, fsmonitor neutralization, output/deadline cleanup, lock preservation, and stale-generation
+fencing. Commit execution remains unavailable in this slice.
+
 ---
 
 ## 5. Repository authorization

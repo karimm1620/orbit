@@ -1,6 +1,7 @@
 mod diff;
 mod graph;
 mod history;
+mod mutation;
 mod process;
 mod status;
 
@@ -15,10 +16,15 @@ pub use graph::{
     read_graph_order, read_object_format, CommitHistoryHead, CommitRef, GraphCommit, ObjectFormat,
 };
 pub use history::{read_recent_commits, CommitSummary};
+pub(crate) use mutation::{
+    ensure_mutation_state_allowed, index_lock_exists, run_stage_all, run_stage_file,
+    run_unstage_all, run_unstage_file,
+};
 pub use process::GitRunner;
-#[cfg(test)]
-pub use status::ChangeKind;
+pub(crate) use process::{GitMutationOutput, GitMutationTermination};
+pub(crate) use status::ChangeKind;
 pub(crate) use status::{read_detailed_status, StatusEntry};
 pub use status::{
-    read_status, ChangeFacet, ConflictKind, HeadSnapshot, SubmoduleState, WorkingTreeSnapshot,
+    read_status, ChangeFacet, ConflictKind, HeadSnapshot, StatusSnapshot, SubmoduleState,
+    WorkingTreeSnapshot,
 };

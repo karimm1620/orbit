@@ -4,21 +4,43 @@ use std::{
     io::{self, Read},
     path::Path,
     process::{Command, ExitStatus, Stdio},
-    sync::{Arc, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, OnceLock,
+    },
     thread,
     time::{Duration, Instant},
 };
+
+#[cfg(unix)]
+use std::os::{fd::AsRawFd, unix::process::CommandExt};
 
 use crate::error::OrbitError;
 
 const STDERR_LIMIT: usize = 64 * 1024;
 const NO_LAZY_FETCH_ENVIRONMENT: &str = "GIT_NO_LAZY_FETCH";
+const MUTATION_READER_GRACE: Duration = Duration::from_millis(50);
 
 #[derive(Debug)]
 pub struct GitOutput {
     pub status: ExitStatus,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GitMutationTermination {
+    Exited,
+    TimedOut,
+    OutputTooLarge,
+    RunnerFailed,
+}
+
+#[derive(Debug)]
+pub(crate) struct GitMutationOutput {
+    pub status: Option<ExitStatus>,
+    pub stderr: Vec<u8>,
+    pub termination: GitMutationTermination,
 }
 
 #[derive(Clone)]
@@ -29,6 +51,8 @@ pub struct GitRunner {
     environment: Vec<(OsString, OsString)>,
     #[cfg(test)]
     restore_no_lazy_fetch_environment: bool,
+    #[cfg(test)]
+    mutation_deadline_override: Option<Duration>,
 }
 
 impl Default for GitRunner {
@@ -40,6 +64,8 @@ impl Default for GitRunner {
             environment: Vec::new(),
             #[cfg(test)]
             restore_no_lazy_fetch_environment: true,
+            #[cfg(test)]
+            mutation_deadline_override: None,
         }
     }
 }
@@ -52,6 +78,7 @@ impl GitRunner {
             no_lazy_fetch_capability: Arc::new(OnceLock::new()),
             environment: Vec::new(),
             restore_no_lazy_fetch_environment: true,
+            mutation_deadline_override: None,
         }
     }
 
@@ -68,6 +95,12 @@ impl GitRunner {
     #[cfg(test)]
     pub fn without_no_lazy_fetch_environment(mut self) -> Self {
         self.restore_no_lazy_fetch_environment = false;
+        self
+    }
+
+    #[cfg(test)]
+    pub fn with_mutation_deadline(mut self, deadline: Duration) -> Self {
+        self.mutation_deadline_override = Some(deadline);
         self
     }
 
@@ -134,6 +167,97 @@ impl GitRunner {
         S: AsRef<OsStr>,
     {
         self.run_inner(current_dir, operation, args, stdout_limit, Some(deadline))
+    }
+
+    pub(crate) fn run_mutation<I, S>(
+        &self,
+        current_dir: &Path,
+        operation: &'static str,
+        args: I,
+        stdout_limit: usize,
+        deadline: Duration,
+        termination_grace: Duration,
+    ) -> Result<GitMutationOutput, OrbitError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        #[cfg(test)]
+        let deadline = self.mutation_deadline_override.unwrap_or(deadline);
+
+        let mut command = Command::new(&self.executable);
+        command
+            .args(args)
+            .current_dir(current_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        #[cfg(unix)]
+        command.process_group(0);
+
+        #[cfg(test)]
+        command.envs(self.environment.iter().cloned());
+        scrub_git_environment(&mut command, self.test_environment_names());
+        #[cfg(not(test))]
+        command.env(NO_LAZY_FETCH_ENVIRONMENT, "1");
+        #[cfg(test)]
+        if self.restore_no_lazy_fetch_environment {
+            command.env(NO_LAZY_FETCH_ENVIRONMENT, "1");
+        }
+
+        let mut child = command
+            .spawn()
+            .map_err(|error| OrbitError::git_spawn(operation, &error))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| OrbitError::internal(operation, "Git stdout was unavailable."))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| OrbitError::internal(operation, "Git stderr was unavailable."))?;
+
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let output_exceeded = Arc::new(AtomicBool::new(false));
+        let stdout_done = Arc::new(AtomicBool::new(false));
+        let stderr_done = Arc::new(AtomicBool::new(false));
+        let stdout_reader = spawn_mutation_reader(
+            stdout,
+            stdout_limit,
+            Arc::clone(&cancelled),
+            Arc::clone(&output_exceeded),
+            Arc::clone(&stdout_done),
+        );
+        let stderr_reader = spawn_mutation_reader(
+            stderr,
+            STDERR_LIMIT,
+            Arc::clone(&cancelled),
+            Arc::clone(&output_exceeded),
+            Arc::clone(&stderr_done),
+        );
+
+        let (status, mut termination) =
+            wait_for_mutation_child(&mut child, deadline, termination_grace, &output_exceeded);
+        wait_for_mutation_readers(&stdout_done, &stderr_done, MUTATION_READER_GRACE);
+        cancelled.store(true, Ordering::Release);
+        let stdout = join_mutation_reader(stdout_reader);
+        let stderr = join_mutation_reader(stderr_reader);
+
+        let stdout_failed = stdout.is_err();
+        let (stderr, stderr_failed) = match stderr {
+            Ok(read) => (read.bytes, false),
+            Err(_) => (Vec::new(), true),
+        };
+        if (stdout_failed || stderr_failed) && termination == GitMutationTermination::Exited {
+            termination = GitMutationTermination::RunnerFailed;
+        }
+
+        Ok(GitMutationOutput {
+            status,
+            stderr,
+            termination,
+        })
     }
 
     fn run_inner<I, S>(
@@ -258,6 +382,94 @@ fn wait_for_child(
     }
 }
 
+fn wait_for_mutation_child(
+    child: &mut std::process::Child,
+    deadline: Duration,
+    termination_grace: Duration,
+    output_exceeded: &AtomicBool,
+) -> (Option<ExitStatus>, GitMutationTermination) {
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return (Some(status), GitMutationTermination::Exited),
+            Ok(None) => {}
+            Err(_) => {
+                return (
+                    terminate_mutation_process(child, termination_grace),
+                    GitMutationTermination::RunnerFailed,
+                );
+            }
+        }
+
+        if output_exceeded.load(Ordering::Acquire) {
+            return (
+                terminate_mutation_process(child, termination_grace),
+                GitMutationTermination::OutputTooLarge,
+            );
+        }
+        if started.elapsed() >= deadline {
+            return (
+                terminate_mutation_process(child, termination_grace),
+                GitMutationTermination::TimedOut,
+            );
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn terminate_mutation_process(
+    child: &mut std::process::Child,
+    termination_grace: Duration,
+) -> Option<ExitStatus> {
+    signal_process_group(child, TerminationSignal::Terminate);
+    let grace_started = Instant::now();
+    while grace_started.elapsed() < termination_grace {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(_) => break,
+        }
+    }
+
+    signal_process_group(child, TerminationSignal::Kill);
+    child.wait().ok()
+}
+
+enum TerminationSignal {
+    Terminate,
+    Kill,
+}
+
+#[cfg(unix)]
+fn signal_process_group(child: &mut std::process::Child, signal: TerminationSignal) {
+    let signal = match signal {
+        TerminationSignal::Terminate => libc::SIGTERM,
+        TerminationSignal::Kill => libc::SIGKILL,
+    };
+    let process_group = -(child.id() as libc::pid_t);
+    // The process group was created by this runner immediately before spawn.
+    // ESRCH is harmless when Git wins the race and exits naturally.
+    unsafe {
+        libc::kill(process_group, signal);
+    }
+}
+
+#[cfg(not(unix))]
+fn signal_process_group(child: &mut std::process::Child, signal: TerminationSignal) {
+    if matches!(signal, TerminationSignal::Kill) {
+        let _ = child.kill();
+    }
+}
+
+fn wait_for_mutation_readers(stdout_done: &AtomicBool, stderr_done: &AtomicBool, grace: Duration) {
+    let started = Instant::now();
+    while started.elapsed() < grace
+        && (!stdout_done.load(Ordering::Acquire) || !stderr_done.load(Ordering::Acquire))
+    {
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
 fn scrub_git_environment(
     command: &mut Command,
     additional_names: impl IntoIterator<Item = OsString>,
@@ -278,6 +490,115 @@ fn is_git_environment_name(name: &OsStr) -> bool {
 struct BoundedRead {
     bytes: Vec<u8>,
     exceeded: bool,
+}
+
+#[cfg(unix)]
+fn spawn_mutation_reader<R>(
+    reader: R,
+    limit: usize,
+    cancelled: Arc<AtomicBool>,
+    exceeded: Arc<AtomicBool>,
+    done: Arc<AtomicBool>,
+) -> thread::JoinHandle<io::Result<BoundedRead>>
+where
+    R: Read + AsRawFd + Send + 'static,
+{
+    thread::spawn(move || {
+        let result = read_bounded_cancellable(reader, limit, &cancelled, &exceeded);
+        done.store(true, Ordering::Release);
+        result
+    })
+}
+
+#[cfg(not(unix))]
+fn spawn_mutation_reader<R>(
+    reader: R,
+    limit: usize,
+    cancelled: Arc<AtomicBool>,
+    exceeded: Arc<AtomicBool>,
+    done: Arc<AtomicBool>,
+) -> thread::JoinHandle<io::Result<BoundedRead>>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let result = read_bounded_cancellable(reader, limit, &cancelled, &exceeded);
+        done.store(true, Ordering::Release);
+        result
+    })
+}
+
+#[cfg(unix)]
+fn read_bounded_cancellable<R>(
+    mut reader: R,
+    limit: usize,
+    cancelled: &AtomicBool,
+    exceeded: &AtomicBool,
+) -> io::Result<BoundedRead>
+where
+    R: Read + AsRawFd,
+{
+    let descriptor = reader.as_raw_fd();
+    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let mut bytes = Vec::with_capacity(limit.min(64 * 1024));
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        if cancelled.load(Ordering::Acquire) {
+            break;
+        }
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => {
+                let remaining = limit.saturating_sub(bytes.len());
+                let retained = read.min(remaining);
+                bytes.extend_from_slice(&buffer[..retained]);
+                if retained < read {
+                    exceeded.store(true, Ordering::Release);
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(2));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Ok(BoundedRead {
+        bytes,
+        exceeded: exceeded.load(Ordering::Acquire),
+    })
+}
+
+#[cfg(not(unix))]
+fn read_bounded_cancellable<R>(
+    reader: R,
+    limit: usize,
+    _cancelled: &AtomicBool,
+    exceeded: &AtomicBool,
+) -> io::Result<BoundedRead>
+where
+    R: Read,
+{
+    let read = read_bounded(reader, limit)?;
+    if read.exceeded {
+        exceeded.store(true, Ordering::Release);
+    }
+    Ok(read)
+}
+
+fn join_mutation_reader(
+    reader: thread::JoinHandle<io::Result<BoundedRead>>,
+) -> io::Result<BoundedRead> {
+    reader
+        .join()
+        .map_err(|_| io::Error::other("Git output reader panicked"))?
 }
 
 fn read_bounded(mut reader: impl Read, limit: usize) -> io::Result<BoundedRead> {
@@ -428,6 +749,268 @@ mod tests {
             "timed-out child must be reaped before return"
         );
         fs::remove_dir_all(root).expect("remove timeout fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mutation_deadline_terminates_the_git_process_group_and_descendant() {
+        use std::{
+            fs,
+            os::unix::fs::PermissionsExt,
+            time::{SystemTime, UNIX_EPOCH},
+        };
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "orbit-mutation-timeout-test-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).expect("create mutation timeout fixture");
+        let parent_pid = root.join("parent-pid");
+        let child_pid = root.join("child-pid");
+        let executable = root.join("slow-git");
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nsleep 30 &\nprintf '%s' \"$!\" > '{}'\nwait\n",
+                parent_pid.display(),
+                child_pid.display()
+            ),
+        )
+        .expect("write mutation timeout fixture");
+        let mut permissions = fs::metadata(&executable)
+            .expect("fixture metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).expect("make fixture executable");
+
+        let output = GitRunner::with_executable(&executable)
+            .with_mutation_deadline(Duration::from_millis(150))
+            .run_mutation(
+                &root,
+                "stage_file",
+                std::iter::empty::<&str>(),
+                64,
+                Duration::from_secs(120),
+                Duration::from_millis(250),
+            )
+            .expect("mutation process should start");
+
+        assert_eq!(output.termination, GitMutationTermination::TimedOut);
+        for pid_file in [&parent_pid, &child_pid] {
+            let pid = fs::read_to_string(pid_file).expect("fixture PID");
+            for _ in 0..50 {
+                if !Path::new("/proc").join(pid.trim()).exists() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                !Path::new("/proc").join(pid.trim()).exists(),
+                "ordinary mutation descendant should not remain alive"
+            );
+        }
+        fs::remove_dir_all(root).expect("remove mutation timeout fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mutation_timeout_never_removes_a_possible_git_lock() {
+        use std::{
+            fs,
+            os::unix::fs::PermissionsExt,
+            time::{SystemTime, UNIX_EPOCH},
+        };
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "orbit-mutation-lock-test-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(root.join(".git")).expect("create lock fixture");
+        let executable = root.join("locking-git");
+        fs::write(
+            &executable,
+            "#!/bin/sh\n: > .git/index.lock\ntrap '' TERM\nsleep 30\n",
+        )
+        .expect("write locking fixture");
+        let mut permissions = fs::metadata(&executable)
+            .expect("fixture metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).expect("make fixture executable");
+
+        let output = GitRunner::with_executable(&executable)
+            .with_mutation_deadline(Duration::from_millis(100))
+            .run_mutation(
+                &root,
+                "stage_all",
+                std::iter::empty::<&str>(),
+                64,
+                Duration::from_secs(120),
+                Duration::from_millis(100),
+            )
+            .expect("mutation process should start");
+
+        assert_eq!(output.termination, GitMutationTermination::TimedOut);
+        assert!(
+            root.join(".git/index.lock").exists(),
+            "runner must not delete a lock it does not own"
+        );
+        fs::remove_dir_all(root).expect("remove lock fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mutation_output_overflow_stops_the_process_group_with_a_bounded_result() {
+        use std::{
+            fs,
+            os::unix::fs::PermissionsExt,
+            time::{SystemTime, UNIX_EPOCH},
+        };
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "orbit-mutation-output-test-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).expect("create output fixture");
+        let executable = root.join("noisy-git");
+        fs::write(
+            &executable,
+            "#!/bin/sh\nwhile :; do printf '0123456789abcdef'; done\n",
+        )
+        .expect("write noisy fixture");
+        let mut permissions = fs::metadata(&executable)
+            .expect("fixture metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).expect("make fixture executable");
+
+        let started = Instant::now();
+        let output = GitRunner::with_executable(&executable)
+            .run_mutation(
+                &root,
+                "stage_all",
+                std::iter::empty::<&str>(),
+                1024,
+                Duration::from_secs(10),
+                Duration::from_millis(200),
+            )
+            .expect("mutation process should start");
+
+        assert_eq!(output.termination, GitMutationTermination::OutputTooLarge);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        fs::remove_dir_all(root).expect("remove output fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn escaped_descendant_cannot_hold_mutation_pipe_readers_open() {
+        use std::{
+            fs,
+            os::unix::fs::PermissionsExt,
+            time::{SystemTime, UNIX_EPOCH},
+        };
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "orbit-mutation-escaped-reader-test-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).expect("create escaped-reader fixture");
+        let executable = root.join("escaping-git");
+        fs::write(&executable, "#!/bin/sh\nsetsid sleep 2 &\nexit 0\n")
+            .expect("write escaped-reader fixture");
+        let mut permissions = fs::metadata(&executable)
+            .expect("fixture metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).expect("make fixture executable");
+
+        let started = Instant::now();
+        let output = GitRunner::with_executable(&executable)
+            .run_mutation(
+                &root,
+                "stage_all",
+                std::iter::empty::<&str>(),
+                64,
+                Duration::from_secs(10),
+                Duration::from_millis(200),
+            )
+            .expect("mutation process should start");
+
+        assert_eq!(output.termination, GitMutationTermination::Exited);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "escaped process retaining pipes must not extend Orbit's wait"
+        );
+        fs::remove_dir_all(root).expect("remove escaped-reader fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mutation_runner_scrubs_untrusted_git_environment_and_restores_its_policy() {
+        use std::{
+            fs,
+            os::unix::fs::PermissionsExt,
+            time::{SystemTime, UNIX_EPOCH},
+        };
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "orbit-mutation-environment-test-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).expect("create environment fixture");
+        let marker = root.join("environment-ok");
+        let executable = root.join("environment-git");
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\n[ -z \"${{GIT_DIR+x}}\" ] || exit 20\n[ \"$GIT_NO_LAZY_FETCH\" = 1 ] || exit 21\n: > '{}'\n",
+                marker.display()
+            ),
+        )
+        .expect("write environment fixture");
+        let mut permissions = fs::metadata(&executable)
+            .expect("fixture metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).expect("make fixture executable");
+
+        let output = GitRunner::with_executable(&executable)
+            .with_environment("GIT_DIR", "/tmp/untrusted")
+            .with_environment(NO_LAZY_FETCH_ENVIRONMENT, "0")
+            .run_mutation(
+                &root,
+                "stage_file",
+                std::iter::empty::<&str>(),
+                64,
+                Duration::from_secs(2),
+                Duration::from_millis(100),
+            )
+            .expect("mutation process should start");
+
+        assert_eq!(output.termination, GitMutationTermination::Exited);
+        assert!(output.status.is_some_and(|status| status.success()));
+        assert!(marker.exists());
+        fs::remove_dir_all(root).expect("remove environment fixture");
     }
 
     #[cfg(unix)]

@@ -127,6 +127,121 @@ impl OrbitError {
         }
     }
 
+    pub fn mutation_in_progress() -> Self {
+        Self {
+            code: "mutation_in_progress",
+            title: "Repository update already in progress",
+            message: "Wait for the current staging or commit operation to finish before starting another one.".into(),
+            operation: "mutate_repository",
+            recoverable: true,
+            details: None,
+        }
+    }
+
+    pub fn mutation_stale(message: impl Into<String>) -> Self {
+        Self {
+            code: "mutation_stale",
+            title: "Changes need to refresh",
+            message: message.into(),
+            operation: "mutate_repository",
+            recoverable: true,
+            details: None,
+        }
+    }
+
+    pub fn mutation_not_applicable(message: impl Into<String>) -> Self {
+        Self {
+            code: "mutation_not_applicable",
+            title: "Repository update is not available",
+            message: message.into(),
+            operation: "mutate_repository",
+            recoverable: true,
+            details: None,
+        }
+    }
+
+    pub fn mutation_rejected(operation: &'static str, stderr: &[u8], lock_remains: bool) -> Self {
+        Self::mutation_diagnostic(
+            "mutation_rejected",
+            "Git rejected the repository update",
+            "Git did not accept the requested staging change.",
+            operation,
+            stderr,
+            lock_remains,
+        )
+    }
+
+    pub fn mutation_warning(operation: &'static str, stderr: &[u8], lock_remains: bool) -> Self {
+        Self::mutation_diagnostic(
+            "mutation_warning",
+            "Repository updated with a Git warning",
+            "The staging change was applied, but Git produced additional diagnostic output.",
+            operation,
+            stderr,
+            lock_remains,
+        )
+    }
+
+    pub fn mutation_uncertain(
+        code: &'static str,
+        operation: &'static str,
+        message: impl Into<String>,
+        stderr: &[u8],
+        lock_remains: bool,
+    ) -> Self {
+        Self::mutation_diagnostic(
+            code,
+            "Repository update needs verification",
+            message,
+            operation,
+            stderr,
+            lock_remains,
+        )
+    }
+
+    pub fn post_mutation_refresh_failed(operation: &'static str) -> Self {
+        Self {
+            code: "post_mutation_refresh_failed",
+            title: "Repository update needs a refresh",
+            message: "Orbit could not install authoritative repository state after the Git operation. Refresh before continuing.".into(),
+            operation,
+            recoverable: true,
+            details: None,
+        }
+    }
+
+    fn mutation_diagnostic(
+        code: &'static str,
+        title: &'static str,
+        message: impl Into<String>,
+        operation: &'static str,
+        stderr: &[u8],
+        lock_remains: bool,
+    ) -> Self {
+        let stderr = sanitize_diagnostic(String::from_utf8_lossy(stderr).trim());
+        let lock = "A Git index lock remains; Orbit did not remove it.";
+        let details = match (stderr.is_empty(), lock_remains) {
+            (true, false) => None,
+            (false, false) => Some(stderr),
+            (true, true) => Some(lock.into()),
+            (false, true) => {
+                let lock_length = lock.chars().count() + 1;
+                let stderr_budget = MAX_DIAGNOSTIC_CHARS.saturating_sub(lock_length);
+                let stderr = stderr.chars().take(stderr_budget).collect::<String>();
+                Some(format!("{stderr}\n{lock}"))
+            }
+        };
+
+        Self {
+            code,
+            title,
+            message: message.into(),
+            operation,
+            recoverable: true,
+            details,
+        }
+    }
+
     pub fn git_failed(operation: &'static str, stderr: &[u8]) -> Self {
         let detail = String::from_utf8_lossy(stderr);
         let detail = sanitize_diagnostic(detail.trim());
@@ -214,5 +329,29 @@ mod tests {
 
         assert_eq!(details.chars().count(), MAX_DIAGNOSTIC_CHARS);
         assert!(!details.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn mutation_diagnostics_are_bounded_and_report_a_remaining_lock() {
+        let stderr = vec![b'x'; MAX_DIAGNOSTIC_CHARS * 2];
+        let error = OrbitError::mutation_uncertain(
+            "mutation_timed_out",
+            "stage_file",
+            "The result is uncertain.",
+            &stderr,
+            true,
+        );
+        let details = error.details.expect("bounded mutation detail");
+
+        assert_eq!(error.code, "mutation_timed_out");
+        assert_eq!(details.chars().count(), MAX_DIAGNOSTIC_CHARS);
+        assert!(details.contains('x'));
+        assert!(details.contains("index lock"));
+
+        let lock_only = OrbitError::mutation_rejected("stage_all", b"", true);
+        assert!(lock_only
+            .details
+            .as_deref()
+            .is_some_and(|detail| detail.contains("index lock")));
     }
 }

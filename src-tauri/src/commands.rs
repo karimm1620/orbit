@@ -8,6 +8,7 @@ use crate::{
     error::OrbitError,
     git::{DiffSide, FileDiff},
     history_sessions::CommitHistoryPage,
+    mutation_registry::MutationReceipt,
     repository::{RepositoryRegistry, RepositorySnapshot},
 };
 
@@ -118,4 +119,69 @@ pub async fn get_commit_history_page(
             "The commit-history reader stopped unexpectedly.",
         )
     })?
+}
+
+#[tauri::command]
+pub async fn stage_file(
+    repository_id: String,
+    change_set_id: String,
+    file_id: String,
+    repositories: State<'_, Arc<RepositoryRegistry>>,
+) -> Result<MutationReceipt, OrbitError> {
+    let repositories = Arc::clone(&repositories);
+    tauri::async_runtime::spawn_blocking(move || {
+        repositories.stage_file(&repository_id, &change_set_id, &file_id)
+    })
+    .await
+    .map_err(|_| mutation_worker_error("stage_file"))?
+}
+
+#[tauri::command]
+pub async fn unstage_file(
+    repository_id: String,
+    change_set_id: String,
+    file_id: String,
+    repositories: State<'_, Arc<RepositoryRegistry>>,
+) -> Result<MutationReceipt, OrbitError> {
+    let repositories = Arc::clone(&repositories);
+    tauri::async_runtime::spawn_blocking(move || {
+        repositories.unstage_file(&repository_id, &change_set_id, &file_id)
+    })
+    .await
+    .map_err(|_| mutation_worker_error("unstage_file"))?
+}
+
+#[tauri::command]
+pub async fn stage_all(
+    repository_id: String,
+    change_set_id: String,
+    repositories: State<'_, Arc<RepositoryRegistry>>,
+) -> Result<MutationReceipt, OrbitError> {
+    let repositories = Arc::clone(&repositories);
+    tauri::async_runtime::spawn_blocking(move || {
+        repositories.stage_all(&repository_id, &change_set_id)
+    })
+    .await
+    .map_err(|_| mutation_worker_error("stage_all"))?
+}
+
+#[tauri::command]
+pub async fn unstage_all(
+    repository_id: String,
+    change_set_id: String,
+    repositories: State<'_, Arc<RepositoryRegistry>>,
+) -> Result<MutationReceipt, OrbitError> {
+    let repositories = Arc::clone(&repositories);
+    tauri::async_runtime::spawn_blocking(move || {
+        repositories.unstage_all(&repository_id, &change_set_id)
+    })
+    .await
+    .map_err(|_| mutation_worker_error("unstage_all"))?
+}
+
+fn mutation_worker_error(operation: &'static str) -> OrbitError {
+    OrbitError::internal(
+        operation,
+        "The repository mutation worker stopped unexpectedly.",
+    )
 }

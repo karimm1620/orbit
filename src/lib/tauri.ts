@@ -200,6 +200,23 @@ export type FileDiff = {
   content: FileDiffContent;
 };
 
+export type MutationOperation =
+  | "stageFile"
+  | "unstageFile"
+  | "stageAll"
+  | "unstageAll";
+
+export type MutationOutcome = "applied" | "rejected" | "uncertain";
+
+export type MutationReceipt = {
+  operation: MutationOperation;
+  outcome: MutationOutcome;
+  issue?: OrbitError;
+  repositoryChanges?: RepositoryChanges;
+  refreshRequired: boolean;
+  headChanged: boolean;
+};
+
 export function selectRepository(): Promise<RepositorySnapshot | null> {
   return invoke<RepositorySnapshot | null>("select_repository");
 }
@@ -229,6 +246,50 @@ export function getFileDiff(
     changeSetId,
     fileId,
     side,
+  });
+}
+
+export function stageFile(
+  repositoryId: RepositoryId,
+  changeSetId: ChangeSetId,
+  fileId: FileId,
+): Promise<MutationReceipt> {
+  return invoke<MutationReceipt>("stage_file", {
+    repositoryId,
+    changeSetId,
+    fileId,
+  });
+}
+
+export function unstageFile(
+  repositoryId: RepositoryId,
+  changeSetId: ChangeSetId,
+  fileId: FileId,
+): Promise<MutationReceipt> {
+  return invoke<MutationReceipt>("unstage_file", {
+    repositoryId,
+    changeSetId,
+    fileId,
+  });
+}
+
+export function stageAll(
+  repositoryId: RepositoryId,
+  changeSetId: ChangeSetId,
+): Promise<MutationReceipt> {
+  return invoke<MutationReceipt>("stage_all", {
+    repositoryId,
+    changeSetId,
+  });
+}
+
+export function unstageAll(
+  repositoryId: RepositoryId,
+  changeSetId: ChangeSetId,
+): Promise<MutationReceipt> {
+  return invoke<MutationReceipt>("unstage_all", {
+    repositoryId,
+    changeSetId,
   });
 }
 

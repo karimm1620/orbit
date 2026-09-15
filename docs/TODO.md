@@ -24,17 +24,17 @@
 
 ## 1. M3-B1 — Staging and unstaging service
 
-- [ ] Add a bounded Rust-owned mutation registry with one in-flight operation per repository.
-- [ ] Extend `GitRunner` with opt-in process-group mutation execution, TERM/KILL cleanup, null stdin, and bounded outcomes.
-- [ ] Fence older change refreshes and retire authorizing handles immediately before a mutation starts.
-- [ ] Add the fixed conflict/in-progress-operation guard shared by every M3 mutation.
-- [ ] Implement stage-file with fresh facet/path revalidation and global literal-pathspec mode.
-- [ ] Implement stage-all with fixed whole-worktree semantics and `add.ignoreErrors=false`.
-- [ ] Implement born/unborn unstage-file and unstage-all command branches.
-- [ ] Preserve configured filters and `post-index-change` while neutralizing fsmonitor and lazy fetch.
-- [ ] Return typed applied/rejected/uncertain receipts with replacement detailed changes when available.
-- [ ] Add purpose-specific IPC and TypeScript types without UI controls.
-- [ ] Cover unusual bytes, rename/copy endpoints, mixed facets, stale handles, filters/hooks, partial-failure config, concurrency, deadlines, and lock diagnostics.
+- [x] Add a bounded Rust-owned mutation registry with one in-flight operation per repository.
+- [x] Extend `GitRunner` with opt-in process-group mutation execution, TERM/KILL cleanup, null stdin, and bounded outcomes.
+- [x] Fence older change refreshes and retire authorizing handles immediately before a mutation starts.
+- [x] Add the fixed conflict/in-progress-operation guard shared by every M3 mutation.
+- [x] Implement stage-file with fresh facet/path revalidation and global literal-pathspec mode.
+- [x] Implement stage-all with fixed whole-worktree semantics and `add.ignoreErrors=false`.
+- [x] Implement born/unborn unstage-file and unstage-all command branches.
+- [x] Preserve configured filters and `post-index-change` while neutralizing fsmonitor and lazy fetch.
+- [x] Return typed applied/rejected/uncertain receipts with replacement detailed changes when available.
+- [x] Add purpose-specific IPC and TypeScript types without UI controls.
+- [x] Cover unusual bytes, rename/copy endpoints, mixed facets, stale handles, filters/hooks, partial-failure config, concurrency, deadlines, and lock diagnostics.
 
 ---
 

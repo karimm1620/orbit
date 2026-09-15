@@ -3,6 +3,7 @@ mod commands;
 mod error;
 mod git;
 mod history_sessions;
+mod mutation_registry;
 mod repository;
 
 use std::sync::Arc;
@@ -19,7 +20,11 @@ pub fn run() {
             commands::get_repository_snapshot,
             commands::get_repository_changes,
             commands::get_file_diff,
-            commands::get_commit_history_page
+            commands::get_commit_history_page,
+            commands::stage_file,
+            commands::unstage_file,
+            commands::stage_all,
+            commands::unstage_all
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -4,6 +4,10 @@
 **Tested Git:** 2.55.0 on Linux
 **Scope:** normal file/index staging, unstaging, and local commit creation only
 
+**Implementation status:** M3-B1 staging/unstaging services implement the accepted mutation lease,
+change-set fence, process-group runner, fixed commands, typed receipts, and post-status refresh.
+Commit execution remains deferred to M3-B2.
+
 This document records the evidence and decisions for Orbit's first repository mutations. It is
 read with `SECURITY.md`, `DECISIONS.md`, and the existing M0–M2 architecture. The security model
 wins if another document conflicts with this one.

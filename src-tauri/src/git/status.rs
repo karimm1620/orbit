@@ -90,7 +90,7 @@ pub(crate) struct StatusEntry {
     pub submodule: Option<SubmoduleState>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusSnapshot {
     pub head: HeadSnapshot,
     pub working_tree: WorkingTreeSnapshot,
