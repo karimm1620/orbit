@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test:changes-state": "vitest run src/lib/changesState.test.ts",
+    "test:mutation-ui": "vitest run src/lib/changesState.test.ts src/lib/commitMessage.test.ts",
     "test:graph-layout": "vitest run src/lib/graphLayout.test.ts",
     "test:topology": "vitest run src/lib/topology.test.ts",
     "preview": "vite preview",

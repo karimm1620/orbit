@@ -2,17 +2,22 @@ import { describe, expect, it } from "vitest";
 
 import {
   availableDiffSides,
+  beginMutation,
   beginChangesRefresh,
   beginDiffLoad,
+  canMutateChanges,
+  completeMutation,
   completeChangesRefresh,
   completeDiffLoad,
   createEmptyChangesState,
   failChangesRefresh,
   failDiffLoad,
+  failMutation,
   groupChanges,
+  shouldRefreshAfterMutation,
   workingTreeForChanges,
 } from "./changesState";
-import type { ChangedFile, FileDiff, OrbitError, RepositoryChanges } from "./tauri";
+import type { ChangedFile, FileDiff, MutationReceipt, OrbitError, RepositoryChanges } from "./tauri";
 
 const error: OrbitError = {
   code: "repository_unavailable",
@@ -65,6 +70,10 @@ function diff(changeSetId: string, fileId: string, side: "staged" | "unstaged"):
     side,
     content: { state: "binary" },
   };
+}
+
+function receipt(operation: MutationReceipt["operation"], outcome: MutationReceipt["outcome"], repositoryChanges?: RepositoryChanges): MutationReceipt {
+  return { operation, outcome, repositoryChanges, refreshRequired: false, headChanged: false };
 }
 
 describe("changes state", () => {
@@ -156,5 +165,83 @@ describe("changes state", () => {
     state = beginDiffLoad(state, 1, { fileId: data.files[0].fileId, side: "unstaged" });
     state = beginDiffLoad(state, 2, { fileId: data.files[1].fileId, side: "unstaged" });
     expect(failDiffLoad(state, 1, error)).toBe(state);
+  });
+
+  it("retires selected handles during a file stage and replaces state only from its receipt", () => {
+    const oldData = changes("change-set-one", [file("first", { unstaged: { kind: "modified", oldMode: "100644", newMode: "100644", similarity: null } })]);
+    const nextData = changes("change-set-two", [file("first", { staged: { kind: "modified", oldMode: "100644", newMode: "100644", similarity: null } })]);
+    let state = completeChangesRefresh(beginChangesRefresh(createEmptyChangesState(), 1), 1, oldData);
+    state = beginDiffLoad(state, 1, { fileId: oldData.files[0].fileId, side: "unstaged" });
+    state = beginMutation(state, 2, "stageFile");
+
+    expect(state.stale).toBe(true);
+    expect(state.selected).toBeNull();
+    expect(state.diff.data).toBeNull();
+    expect(canMutateChanges(state)).toBe(false);
+    const completed = completeMutation(state, 2, receipt("stageFile", "applied", nextData));
+    expect(completed.data).toBe(nextData);
+    expect(completed.stale).toBe(false);
+    expect(completed.mutation.feedback?.outcome).toBe("applied");
+  });
+
+  it("covers stage-all and unstage-all through the same receipt boundary", () => {
+    const data = changes("change-set-one", [file("first")]);
+    const stagedData = changes("change-set-two", [file("first")]);
+    const unstagedData = changes("change-set-three", [file("first")]);
+    let state = completeChangesRefresh(beginChangesRefresh(createEmptyChangesState(), 1), 1, data);
+    state = beginMutation(state, 2, "stageAll");
+    state = completeMutation(state, 2, receipt("stageAll", "applied", stagedData));
+    expect(state.data).toBe(stagedData);
+    state = beginMutation(state, 3, "unstageAll");
+    state = completeMutation(state, 3, receipt("unstageAll", "applied", unstagedData));
+    expect(state.data).toBe(unstagedData);
+  });
+
+  it("rejects duplicate, superseded, and repository-switched mutation responses", () => {
+    const data = changes("change-set-one", [file("first")]);
+    const nextData = changes("change-set-two", [file("first")]);
+    let state = completeChangesRefresh(beginChangesRefresh(createEmptyChangesState(), 1), 1, data);
+    state = beginMutation(state, 2, "stageFile");
+    expect(beginMutation(state, 3, "stageFile")).toBe(state);
+    expect(completeMutation(state, 3, receipt("stageFile", "applied", nextData))).toBe(state);
+
+    const switched = createEmptyChangesState();
+    expect(completeMutation(switched, 2, receipt("stageFile", "applied", nextData))).toBe(switched);
+  });
+
+  it("keeps rejected and uncertain mutations explicit without reauthorizing old handles", () => {
+    const data = changes("change-set-one", [file("first")]);
+    const refreshed = changes("change-set-two", [file("first")]);
+    let state = completeChangesRefresh(beginChangesRefresh(createEmptyChangesState(), 1), 1, data);
+    state = beginMutation(state, 2, "unstageFile");
+    state = completeMutation(state, 2, { ...receipt("unstageFile", "rejected", refreshed), issue: error });
+    expect(state.data).toBe(refreshed);
+    expect(state.mutation.feedback?.outcome).toBe("rejected");
+
+    state = beginMutation(state, 3, "stageFile");
+    state = completeMutation(state, 3, { ...receipt("stageFile", "uncertain"), refreshRequired: true });
+    expect(state.stale).toBe(true);
+    expect(state.mutation.feedback?.outcome).toBe("uncertain");
+    expect(state.mutation.feedback?.refreshRequired).toBe(true);
+  });
+
+  it("marks typed stale failures as non-authoritative until a successful refresh", () => {
+    const data = changes("change-set-one", [file("first")]);
+    const refreshed = changes("change-set-two", [file("first")]);
+    let state = completeChangesRefresh(beginChangesRefresh(createEmptyChangesState(), 1), 1, data);
+    state = beginMutation(state, 2, "stageFile");
+    state = failMutation(state, 2, "stageFile", error, true);
+    expect(state.stale).toBe(true);
+    expect(state.mutation.feedback?.outcome).toBe("stale");
+    state = completeChangesRefresh(beginChangesRefresh(state, 3), 3, refreshed);
+    expect(state.stale).toBe(false);
+    expect(state.mutation.feedback?.refreshRequired).toBe(false);
+  });
+
+  it("requires a repository and history refresh after commits or observed HEAD movement", () => {
+    expect(shouldRefreshAfterMutation(receipt("createCommit", "applied"))).toBe(true);
+    expect(shouldRefreshAfterMutation({ ...receipt("stageFile", "applied"), headChanged: true })).toBe(true);
+    expect(shouldRefreshAfterMutation({ ...receipt("stageFile", "uncertain"), refreshRequired: true })).toBe(true);
+    expect(shouldRefreshAfterMutation(receipt("stageFile", "applied"))).toBe(false);
   });
 });

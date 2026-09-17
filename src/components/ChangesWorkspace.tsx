@@ -1,10 +1,13 @@
+import { useState } from "react";
 import type { ChangesState } from "../lib/changesState";
 import {
   availableDiffSides,
+  canMutateChanges,
   defaultDiffSide,
   groupChanges,
   type ChangeSelection,
 } from "../lib/changesState";
+import { isCommitMessageEligible, MAX_COMMIT_MESSAGE_BYTES, messageLimitReason, utf8ByteLength } from "../lib/commitMessage";
 import type {
   ChangeFacet,
   ChangedFile,
@@ -13,15 +16,22 @@ import type {
   DiffSide,
   FileDiffContent,
   OrbitError,
+  FileId,
+  MutationOperation,
 } from "../lib/tauri";
 
 type ChangesWorkspaceProps = {
   changes: ChangesState;
   onRefresh: () => void;
   onSelect: (file: ChangedFile, side: DiffSide) => void;
+  onStageFile: (fileId: FileId) => Promise<boolean>;
+  onUnstageFile: (fileId: FileId) => Promise<boolean>;
+  onStageAll: () => Promise<boolean>;
+  onUnstageAll: () => Promise<boolean>;
+  onCommit: (message: string) => Promise<boolean>;
 };
 
-export function ChangesWorkspace({ changes, onRefresh, onSelect }: ChangesWorkspaceProps) {
+export function ChangesWorkspace({ changes, onRefresh, onSelect, onStageFile, onUnstageFile, onStageAll, onUnstageAll, onCommit }: ChangesWorkspaceProps) {
   const retrySelection = () => {
     if (!changes.data || !changes.selected) return;
     const file = changes.data.files.find((entry) => entry.fileId === changes.selected?.fileId);
@@ -30,20 +40,134 @@ export function ChangesWorkspace({ changes, onRefresh, onSelect }: ChangesWorksp
 
   return (
     <section className="changes-workspace" aria-label="Repository changes and selected-file diff">
-      <ChangesList changes={changes} onRefresh={onRefresh} onSelect={onSelect} />
+      <MutationControls changes={changes} onRefresh={onRefresh} onStageAll={onStageAll} onUnstageAll={onUnstageAll} onCommit={onCommit} />
+      <ChangesList changes={changes} onRefresh={onRefresh} onSelect={onSelect} onStageFile={onStageFile} onUnstageFile={onUnstageFile} />
       <DiffViewer changes={changes} onRetry={retrySelection} />
     </section>
   );
+}
+
+function MutationControls({
+  changes,
+  onRefresh,
+  onStageAll,
+  onUnstageAll,
+  onCommit,
+}: Pick<ChangesWorkspaceProps, "changes" | "onRefresh" | "onStageAll" | "onUnstageAll" | "onCommit">) {
+  const [message, setMessage] = useState("");
+  const [messageError, setMessageError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const summary = changes.data?.summary;
+  const canMutate = canMutateChanges(changes) && !submitting;
+  const staged = summary?.staged ?? 0;
+  const canStageAll = canMutate && ((summary?.unstaged ?? 0) > 0 || (summary?.untracked ?? 0) > 0);
+  const canUnstageAll = canMutate && staged > 0;
+  const commitEligible = canMutate && staged > 0 && isCommitMessageEligible(message);
+  const bytes = utf8ByteLength(message);
+  const limitReason = messageError ?? messageLimitReason(message);
+  const feedback = changes.mutation.feedback;
+  const mutationLabel = operationLabel(changes.mutation.feedback?.operation);
+
+  async function invoke(action: () => Promise<boolean>) {
+    if (!canMutate) return;
+    setSubmitting(true);
+    try {
+      await action();
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function submitCommit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!commitEligible) return;
+    setSubmitting(true);
+    try {
+      if (await onCommit(message)) setMessage("");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  function updateMessage(nextMessage: string) {
+    const nextReason = messageLimitReason(nextMessage);
+    if (nextReason) {
+      setMessageError(nextReason);
+      return;
+    }
+    setMessageError(null);
+    setMessage(nextMessage);
+  }
+
+  return (
+    <section className="changes-mutation" aria-label="Stage and commit changes" aria-busy={changes.mutation.status === "running" || submitting}>
+      <div className="mutation-summary">
+        <div>
+          <h2>Current index</h2>
+          <p className="mutation-staged-count">{staged} {staged === 1 ? "file" : "files"} staged</p>
+          <p>{changes.stale ? "Displayed changes are not authoritative. Refresh before taking another action." : "Stage a file or prepare the current index for a commit."}</p>
+        </div>
+        <div className="mutation-actions" role="group" aria-label="Stage all actions">
+          <button className="button button-secondary" type="button" onClick={() => void invoke(onStageAll)} disabled={!canStageAll}>Stage all</button>
+          <button className="button button-secondary" type="button" onClick={() => void invoke(onUnstageAll)} disabled={!canUnstageAll}>Unstage all</button>
+        </div>
+      </div>
+      <form className="commit-form" onSubmit={(event) => void submitCommit(event)}>
+        <label htmlFor="commit-message">Commit message</label>
+        <textarea
+          id="commit-message"
+          value={message}
+          onChange={(event) => updateMessage(event.target.value)}
+          maxLength={MAX_COMMIT_MESSAGE_BYTES}
+          disabled={!canMutate}
+          aria-describedby="commit-message-help commit-message-count"
+          aria-invalid={limitReason ? true : undefined}
+          placeholder="Describe this change"
+          rows={3}
+        />
+        <div className="commit-form-footer">
+          <span id="commit-message-help">Required, nonblank, and limited to 64 KiB UTF-8.</span>
+          <span id="commit-message-count">{bytes} / {MAX_COMMIT_MESSAGE_BYTES} bytes</span>
+        </div>
+        {limitReason && <p className="commit-input-error" role="alert">{limitReason}</p>}
+        <button className="button button-primary" type="submit" disabled={!commitEligible}>{changes.mutation.status === "running" || submitting ? "Committing..." : "Commit staged changes"}</button>
+      </form>
+      {changes.mutation.status === "running" && <p className="mutation-progress" role="status">{mutationLabel} is in progress. The displayed change set cannot be used again until Orbit receives a result.</p>}
+      {feedback && <MutationFeedback feedback={feedback} onRefresh={onRefresh} stale={changes.stale} />}
+    </section>
+  );
+}
+
+function MutationFeedback({ feedback, onRefresh, stale }: { feedback: NonNullable<ChangesState["mutation"]["feedback"]>; onRefresh: () => void; stale: boolean }) {
+  const title = feedback.outcome === "applied"
+    ? feedback.operation === "createCommit" ? "Commit applied" : "Changes applied"
+    : feedback.outcome === "uncertain"
+      ? "Outcome needs review"
+      : feedback.outcome === "stale"
+        ? "Changes need refresh"
+        : "Change was rejected";
+  const message = feedback.outcome === "uncertain"
+    ? "Git may have changed repository state. Orbit will not retry this action automatically."
+    : feedback.refreshRequired || stale
+      ? "The displayed changes are stale and cannot authorize another mutation until Orbit refreshes them."
+      : feedback.issue?.message ?? (feedback.outcome === "applied" ? "Orbit installed the returned repository state." : "Git rejected this action before it could be applied.");
+  const tone = feedback.outcome === "applied" && !feedback.issue ? "success" : feedback.outcome === "rejected" ? "error" : "warning";
+
+  return <aside className={`mutation-feedback mutation-feedback-${tone}`} aria-live="polite"><div><strong>{title}</strong><p>{message}</p>{feedback.issue?.details && <p className="mutation-feedback-detail">{feedback.issue.details}</p>}</div>{(feedback.refreshRequired || stale) && <button className="text-button" type="button" onClick={onRefresh}>Refresh now</button>}</aside>;
 }
 
 function ChangesList({
   changes,
   onRefresh,
   onSelect,
+  onStageFile,
+  onUnstageFile,
 }: {
   changes: ChangesState;
   onRefresh: () => void;
   onSelect: (file: ChangedFile, side: DiffSide) => void;
+  onStageFile: (fileId: FileId) => Promise<boolean>;
+  onUnstageFile: (fileId: FileId) => Promise<boolean>;
 }) {
   const groups = changes.data ? groupChanges(changes.data.files) : [];
 
@@ -83,6 +207,9 @@ function ChangesList({
                     file={file}
                     selected={changes.selected}
                     onSelect={onSelect}
+                    onStageFile={onStageFile}
+                    onUnstageFile={onUnstageFile}
+                    mutationDisabled={!canMutateChanges(changes)}
                   />
                 ))}
               </ul>
@@ -98,10 +225,16 @@ function ChangeFileRow({
   file,
   selected,
   onSelect,
+  onStageFile,
+  onUnstageFile,
+  mutationDisabled,
 }: {
   file: ChangedFile;
   selected: ChangeSelection | null;
   onSelect: (file: ChangedFile, side: DiffSide) => void;
+  onStageFile: (fileId: FileId) => Promise<boolean>;
+  onUnstageFile: (fileId: FileId) => Promise<boolean>;
+  mutationDisabled: boolean;
 }) {
   const defaultSide = defaultDiffSide(file);
   const sides = availableDiffSides(file);
@@ -114,6 +247,7 @@ function ChangeFileRow({
         className="change-file-main"
         type="button"
         aria-pressed={selectedFile}
+        disabled={mutationDisabled}
         onClick={() => defaultSide && onSelect(file, defaultSide)}
       >
         <span className="change-file-copy">
@@ -123,22 +257,36 @@ function ChangeFileRow({
         <span className="change-file-kind">{description}</span>
       </button>
       {file.conflict === null && sides.length > 0 && (
-        <span className="change-side-controls" role="group" aria-label={`Diff side for ${file.path.text}`}>
+        <span className="change-side-controls" role="group" aria-label={`Diff and stage actions for ${file.path.text}`}>
           {sides.map((side) => (
             <button
               className={`change-side-button${selectedFile && selected?.side === side ? " is-selected" : ""}`}
               key={side}
               type="button"
               aria-pressed={selectedFile && selected?.side === side}
+              disabled={mutationDisabled}
               onClick={() => onSelect(file, side)}
             >
               {side === "staged" ? "Staged" : file.unstaged?.kind === "untracked" ? "New" : "Unstaged"}
             </button>
           ))}
+          {file.unstaged !== null && <button className="change-stage-button" type="button" onClick={() => void onStageFile(file.fileId)} disabled={mutationDisabled} aria-label={`Stage ${file.path.text}`}>Stage</button>}
+          {file.staged !== null && <button className="change-stage-button" type="button" onClick={() => void onUnstageFile(file.fileId)} disabled={mutationDisabled} aria-label={`Unstage ${file.path.text}`}>Unstage</button>}
         </span>
       )}
     </li>
   );
+}
+
+function operationLabel(operation: MutationOperation | undefined) {
+  switch (operation) {
+    case "stageFile": return "Staging file";
+    case "unstageFile": return "Unstaging file";
+    case "stageAll": return "Staging all files";
+    case "unstageAll": return "Unstaging all files";
+    case "createCommit": return "Creating commit";
+    default: return "Mutation";
+  }
 }
 
 function DiffViewer({ changes, onRetry }: { changes: ChangesState; onRetry: () => void }) {

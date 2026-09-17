@@ -179,6 +179,30 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 .history-error .button { margin-top: 16px; }
 
 .changes-workspace { min-height: 560px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); display: grid; grid-template-columns: minmax(260px, 320px) minmax(0, 1fr); background: var(--surface-raised); }
+.changes-mutation { grid-column: 1 / -1; padding: 18px; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: minmax(220px, 0.8fr) minmax(320px, 1.2fr); gap: 18px; background: color-mix(in srgb, var(--surface-soft) 52%, var(--surface-raised)); }
+.mutation-summary { min-width: 0; display: flex; flex-direction: column; justify-content: space-between; gap: 16px; }
+.mutation-summary h2 { margin: 4px 0 0; color: var(--text); font-size: 18px; letter-spacing: -0.02em; }
+.mutation-summary .mutation-staged-count { margin-top: 7px; color: var(--accent-soft); font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; font-weight: 700; }
+.mutation-summary p:not(.eyebrow) { max-width: 360px; margin: 7px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.mutation-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.commit-form { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 12px; align-items: start; }
+.commit-form label { grid-column: 1 / -1; margin-bottom: 6px; color: var(--muted-strong); font-size: 11px; font-weight: 750; letter-spacing: 0.06em; text-transform: uppercase; }
+.commit-form textarea { width: 100%; min-height: 84px; resize: vertical; padding: 10px 11px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface); color: var(--text); font: inherit; font-size: 13px; line-height: 1.45; }
+.commit-form textarea::placeholder { color: var(--muted); }
+.commit-form textarea:focus-visible { outline: 2px solid var(--accent-soft); outline-offset: 2px; border-color: var(--accent); }
+.commit-form textarea:disabled { cursor: not-allowed; opacity: 0.6; }
+.commit-form-footer { grid-column: 1 / -1; margin-top: 6px; display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 10px; line-height: 1.4; }
+.commit-form-footer span:last-child { flex: none; font-family: "SFMono-Regular", Consolas, monospace; }
+.commit-form .button { grid-column: 1 / -1; justify-self: end; margin-top: 12px; }
+.commit-input-error { grid-column: 1 / -1; margin: 7px 0 0; color: var(--danger); font-size: 11px; line-height: 1.4; }
+.mutation-feedback { grid-column: 1 / -1; padding: 10px 11px; border: 1px solid var(--line-strong); display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; color: var(--muted-strong); font-size: 12px; line-height: 1.45; }
+.mutation-feedback strong { color: var(--text); }
+.mutation-feedback p { margin: 3px 0 0; }
+.mutation-feedback-success { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.mutation-feedback-warning { border-color: color-mix(in srgb, var(--warning) 55%, var(--line)); background: color-mix(in srgb, var(--warning) 8%, transparent); }
+.mutation-feedback-error { border-color: color-mix(in srgb, var(--danger) 55%, var(--line)); background: color-mix(in srgb, var(--danger) 8%, transparent); }
+.mutation-feedback-detail { overflow-wrap: anywhere; color: var(--muted); font-size: 11px; }
+.mutation-progress { grid-column: 1 / -1; margin: 0; color: var(--warning); font-size: 12px; line-height: 1.45; }
 .changes-panel { min-width: 0; border-right: 1px solid var(--line); background: color-mix(in srgb, var(--surface-soft) 36%, var(--surface-raised)); }
 .changes-panel-heading, .diff-panel-heading { min-height: 72px; padding: 16px 18px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .changes-panel-heading h2, .diff-panel-heading h2 { margin: 4px 0 0; color: var(--text); font-size: 18px; letter-spacing: -0.02em; }
@@ -201,10 +225,13 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 .change-file-copy strong { color: var(--text); font-size: 12px; font-weight: 650; }
 .change-file-copy small { color: var(--muted); font-size: 10px; }
 .change-file-kind { flex: none; max-width: 78px; overflow: hidden; color: var(--muted); font-size: 10px; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
-.change-side-controls { padding: 7px 10px 7px 0; display: flex; align-items: center; gap: 4px; }
+.change-side-controls { padding: 7px 10px 7px 0; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 4px; }
 .change-side-button { min-height: 44px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface-raised); color: var(--muted); cursor: pointer; font-size: 10px; font-weight: 700; }
 .change-side-button:hover { border-color: var(--line-strong); color: var(--muted-strong); }
 .change-side-button.is-selected { border-color: color-mix(in srgb, var(--accent) 60%, var(--line)); color: var(--accent-soft); background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.change-stage-button { min-height: 44px; padding: 6px 8px; border: 1px solid color-mix(in srgb, var(--accent) 52%, var(--line)); border-radius: 4px; background: color-mix(in srgb, var(--accent) 8%, var(--surface-raised)); color: var(--accent-soft); cursor: pointer; font-size: 10px; font-weight: 750; }
+.change-stage-button:hover:not(:disabled) { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, var(--surface-raised)); }
+.change-stage-button:disabled, .change-side-button:disabled, .change-file-main:disabled { cursor: not-allowed; opacity: 0.58; }
 .changes-loading, .changes-empty { min-height: 200px; padding: 24px 18px; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 9px; }
 .changes-loading span, .diff-loading span { width: 82%; height: 8px; border-radius: 4px; background: var(--surface-soft); }
 .changes-loading span:nth-child(2), .diff-loading span:nth-child(2) { width: 58%; }
@@ -241,5 +268,5 @@ code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
 .diff-no-newline { grid-column: 4; padding-right: 16px; color: var(--warning); font-size: 10px; font-style: italic; }
 
 @media (prefers-reduced-motion: reduce) { .button { transition: none; } }
-@media (max-width: 900px) { .workspace-grid { grid-template-columns: 1fr; gap: 30px; } .details-panel { padding: 24px 0 0; border-top: 1px solid var(--line); border-left: 0; } .changes-workspace { grid-template-columns: minmax(240px, 280px) minmax(0, 1fr); } }
-@media (max-width: 680px) { .app-header { padding: 0 20px; } .workspace { padding: 28px 20px 40px; } .error-banner { margin-right: 20px; margin-left: 20px; } .state-rail { align-items: flex-start; flex-direction: column; } .state-summary { flex-wrap: wrap; } .change-strip { grid-template-columns: repeat(2, minmax(70px, 1fr)); gap: 16px; } .upstream-summary { grid-column: 1 / -1; padding-top: 14px; padding-left: 0; border-top: 1px solid var(--line); border-left: 0; } .repository-heading { gap: 16px; } .repository-heading .button { flex: none; } .commit-meta span:first-child { max-width: 110px; } .ref-badge { max-width: 160px; } .changes-workspace { grid-template-columns: 1fr; } .changes-panel { border-right: 0; border-bottom: 1px solid var(--line); } .diff-line { grid-template-columns: 42px 42px 17px minmax(0, 1fr); font-size: 11px; } .diff-loading, .diff-state, .diff-error { min-height: 180px; padding: 24px 18px; } }
+@media (max-width: 900px) { .workspace-grid { grid-template-columns: 1fr; gap: 30px; } .details-panel { padding: 24px 0 0; border-top: 1px solid var(--line); border-left: 0; } .changes-workspace { grid-template-columns: minmax(240px, 280px) minmax(0, 1fr); } .changes-mutation { grid-template-columns: 1fr; } }
+@media (max-width: 680px) { .app-header { padding: 0 20px; } .workspace { padding: 28px 20px 40px; } .error-banner { margin-right: 20px; margin-left: 20px; } .state-rail { align-items: flex-start; flex-direction: column; } .state-summary { flex-wrap: wrap; } .change-strip { grid-template-columns: repeat(2, minmax(70px, 1fr)); gap: 16px; } .upstream-summary { grid-column: 1 / -1; padding-top: 14px; padding-left: 0; border-top: 1px solid var(--line); border-left: 0; } .repository-heading { gap: 16px; } .repository-heading .button { flex: none; } .commit-meta span:first-child { max-width: 110px; } .ref-badge { max-width: 160px; } .changes-workspace { grid-template-columns: 1fr; } .changes-mutation { padding: 14px; } .mutation-actions .button { flex: 1; } .commit-form-footer, .mutation-feedback { align-items: flex-start; flex-direction: column; } .changes-panel { border-right: 0; border-bottom: 1px solid var(--line); } .diff-line { grid-template-columns: 42px 42px 17px minmax(0, 1fr); font-size: 11px; } .diff-loading, .diff-state, .diff-error { min-height: 180px; padding: 24px 18px; } }

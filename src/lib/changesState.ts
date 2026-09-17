@@ -2,6 +2,9 @@ import type {
   ChangedFile,
   DiffSide,
   FileDiff,
+  MutationOperation,
+  MutationOutcome,
+  MutationReceipt,
   OrbitError,
   RepositoryChanges,
   RepositorySnapshot,
@@ -24,6 +27,23 @@ export type ChangesState = {
     data: FileDiff | null;
     requestId: number;
   };
+  mutation: {
+    status: "idle" | "running";
+    requestId: number;
+    repositoryId: RepositoryChanges["repositoryId"] | null;
+    changeSetId: RepositoryChanges["changeSetId"] | null;
+    feedback: MutationFeedback | null;
+  };
+  stale: boolean;
+};
+
+export type MutationFeedback = {
+  operation: MutationOperation;
+  outcome: MutationOutcome | "stale";
+  issue: OrbitError | null;
+  refreshRequired: boolean;
+  headChanged: boolean;
+  commitOid: string | null;
 };
 
 export type ChangesGroup = {
@@ -40,6 +60,8 @@ export function createEmptyChangesState(): ChangesState {
     changesRequestId: 0,
     selected: null,
     diff: { status: "idle", error: null, data: null, requestId: 0 },
+    mutation: { status: "idle", requestId: 0, repositoryId: null, changeSetId: null, feedback: null },
+    stale: false,
   };
 }
 
@@ -68,7 +90,111 @@ export function completeChangesRefresh(
     error: null,
     selected: null,
     diff: { status: "idle", error: null, data: null, requestId: state.diff.requestId },
+    stale: false,
+    mutation: {
+      ...state.mutation,
+      feedback: state.mutation.feedback?.refreshRequired
+        ? { ...state.mutation.feedback, refreshRequired: false }
+        : state.mutation.feedback,
+    },
   };
+}
+
+export function canMutateChanges(state: ChangesState): boolean {
+  return state.data !== null && state.status === "idle" && state.mutation.status === "idle" && !state.stale;
+}
+
+export function beginMutation(
+  state: ChangesState,
+  requestId: number,
+  operation: MutationOperation,
+): ChangesState {
+  if (!canMutateChanges(state) || !state.data) return state;
+
+  return {
+    ...state,
+    changesRequestId: requestId,
+    error: null,
+    selected: null,
+    diff: { status: "idle", error: null, data: null, requestId: state.diff.requestId },
+    mutation: {
+      status: "running",
+      requestId,
+      repositoryId: state.data.repositoryId,
+      changeSetId: state.data.changeSetId,
+      feedback: { operation, outcome: "stale", issue: null, refreshRequired: false, headChanged: false, commitOid: null },
+    },
+    stale: true,
+  };
+}
+
+export function completeMutation(
+  state: ChangesState,
+  requestId: number,
+  receipt: MutationReceipt,
+): ChangesState {
+  const mutation = state.mutation;
+  if (
+    mutation.status !== "running"
+    || mutation.requestId !== requestId
+    || mutation.repositoryId !== state.data?.repositoryId
+    || mutation.changeSetId !== state.data?.changeSetId
+    || receipt.operation !== mutation.feedback?.operation
+  ) {
+    return state;
+  }
+
+  const replacement = receipt.repositoryChanges;
+  const replacementMatchesRepository = replacement?.repositoryId === mutation.repositoryId;
+  const refreshRequired = receipt.refreshRequired || !replacementMatchesRepository;
+  return {
+    ...state,
+    data: replacementMatchesRepository ? replacement : state.data,
+    status: "idle",
+    error: null,
+    selected: null,
+    diff: { status: "idle", error: null, data: null, requestId: state.diff.requestId },
+    mutation: {
+      status: "idle",
+      requestId,
+      repositoryId: mutation.repositoryId,
+      changeSetId: replacementMatchesRepository ? replacement.changeSetId : mutation.changeSetId,
+      feedback: {
+        operation: receipt.operation,
+        outcome: receipt.outcome,
+        issue: receipt.issue ?? null,
+        refreshRequired,
+        headChanged: receipt.headChanged,
+        commitOid: receipt.commitOid ?? null,
+      },
+    },
+    stale: refreshRequired,
+  };
+}
+
+export function failMutation(
+  state: ChangesState,
+  requestId: number,
+  operation: MutationOperation,
+  error: OrbitError,
+  stale: boolean,
+): ChangesState {
+  if (state.mutation.status !== "running" || state.mutation.requestId !== requestId) return state;
+  return {
+    ...state,
+    status: "idle",
+    error: null,
+    mutation: {
+      ...state.mutation,
+      status: "idle",
+      feedback: { operation, outcome: stale ? "stale" : "rejected", issue: error, refreshRequired: stale, headChanged: false, commitOid: null },
+    },
+    stale,
+  };
+}
+
+export function shouldRefreshAfterMutation(receipt: MutationReceipt): boolean {
+  return receipt.operation === "createCommit" || receipt.headChanged || receipt.refreshRequired;
 }
 
 export function failChangesRefresh(

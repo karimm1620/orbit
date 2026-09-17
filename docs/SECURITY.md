@@ -336,8 +336,8 @@ fencing. M3-B2 adds only `create_commit(repository_id, change_set_id, message)`:
 blank, NUL, or over-64-KiB messages and sends accepted UTF-8 bytes through Git stdin, never an
 argument, shell, or Orbit temporary file. The fixed commit keeps hooks and configured signing
 enabled after explicit user intent, retains fsmonitor/pager/lazy-fetch/environment hardening,
-verifies post-state HEAD, and conservatively invalidates history before commit launch. No UI or capability expansion is
-introduced.
+verifies post-state HEAD, and conservatively invalidates history before commit launch. M3-C adds no
+capability: the WebView uses only the existing purpose-specific typed mutation APIs and opaque IDs.
 
 ---
 

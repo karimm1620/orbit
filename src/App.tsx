@@ -6,11 +6,16 @@ import { CommitGraph } from "./components/CommitGraph";
 import {
   beginChangesRefresh,
   beginDiffLoad,
+  beginMutation,
+  canMutateChanges,
   completeChangesRefresh,
   completeDiffLoad,
+  completeMutation,
   createEmptyChangesState,
   failChangesRefresh,
   failDiffLoad,
+  failMutation,
+  shouldRefreshAfterMutation,
   workingTreeForChanges,
   type ChangesState,
 } from "./lib/changesState";
@@ -19,11 +24,19 @@ import {
   getCommitHistoryPage,
   getRepositoryChanges,
   getRepositorySnapshot,
+  createCommit,
+  stageAll,
+  stageFile,
+  unstageAll,
+  unstageFile,
   type ChangedFile,
   type CommitHistoryHead,
   type CommitHistoryPage,
   type DiffSide,
   type HistoryCursor,
+  type FileId,
+  type MutationOperation,
+  type MutationReceipt,
   type OrbitError,
   type RepositorySnapshot,
   selectRepository,
@@ -62,6 +75,7 @@ function App() {
   const requestSequence = useRef(0);
   const changesRequestSequence = useRef(0);
   const diffRequestSequence = useRef(0);
+  const mutationRepositories = useRef(new Set<string>());
 
   async function openRepository() {
     const pickerSequence = requestSequence.current;
@@ -94,7 +108,7 @@ function App() {
   }
 
   async function refreshRepository() {
-    if (!repository) return;
+    if (!repository || changes.mutation.status === "running") return;
     const sequence = ++requestSequence.current;
     setRequestState("refreshing");
     setError(null);
@@ -131,7 +145,7 @@ function App() {
   }
 
   async function loadMoreHistory() {
-    if (!repository || history.status !== "idle" || !history.hasMore || !history.cursor) return;
+    if (!repository || changes.mutation.status === "running" || history.status !== "idle" || !history.hasMore || !history.cursor) return;
     const sequence = requestSequence.current;
     const cursor = history.cursor;
     const priorTopology = history.topology;
@@ -176,9 +190,68 @@ function App() {
     }
   }
 
+  async function runMutation(
+    operation: MutationOperation,
+    invokeMutation: (repositoryId: RepositorySnapshot["repositoryId"], changeSetId: NonNullable<ChangesState["data"]>["changeSetId"]) => Promise<MutationReceipt>,
+  ): Promise<boolean> {
+    const targetRepository = repository;
+    const targetChanges = changes.data;
+    if (!targetRepository || !targetChanges || !canMutateChanges(changes)) return false;
+
+    const repositoryKey = targetRepository.repositoryId as string;
+    if (mutationRepositories.current.has(repositoryKey)) return false;
+
+    const sequence = requestSequence.current;
+    const requestId = ++changesRequestSequence.current;
+    mutationRepositories.current.add(repositoryKey);
+    if (operation === "createCommit") {
+      setSelectedOid(null);
+    }
+    setChanges((current) => beginMutation(current, requestId, operation));
+
+    try {
+      const receipt = await invokeMutation(targetRepository.repositoryId, targetChanges.changeSetId);
+      if (sequence !== requestSequence.current) return false;
+      setChanges((current) => completeMutation(current, requestId, receipt));
+
+      if (receipt.headChanged) setSelectedOid(null);
+      if (shouldRefreshAfterMutation(receipt)) await refreshRepository();
+      return receipt.outcome === "applied";
+    } catch (requestError) {
+      if (sequence !== requestSequence.current) return false;
+      const orbitError = toOrbitError(requestError);
+      const stale = orbitError.code === "mutation_stale" || orbitError.code === "change_set_unavailable";
+      setChanges((current) => failMutation(current, requestId, operation, orbitError, stale));
+      if (stale) await refreshRepository();
+      return false;
+    } finally {
+      mutationRepositories.current.delete(repositoryKey);
+    }
+  }
+
+  function stageChangedFile(fileId: FileId) {
+    return runMutation("stageFile", (repositoryId, changeSetId) => stageFile(repositoryId, changeSetId, fileId));
+  }
+
+  function unstageChangedFile(fileId: FileId) {
+    return runMutation("unstageFile", (repositoryId, changeSetId) => unstageFile(repositoryId, changeSetId, fileId));
+  }
+
+  function stageEveryFile() {
+    return runMutation("stageAll", (repositoryId, changeSetId) => stageAll(repositoryId, changeSetId));
+  }
+
+  function unstageEveryFile() {
+    return runMutation("unstageAll", (repositoryId, changeSetId) => unstageAll(repositoryId, changeSetId));
+  }
+
+  function commitStagedChanges(message: string) {
+    return runMutation("createCommit", (repositoryId, changeSetId) => createCommit(repositoryId, changeSetId, message));
+  }
+
   const selectedCommit = useMemo(() => history.rows.find((row) => row.commit.oid === selectedOid)?.commit ?? null, [history.rows, selectedOid]);
   const selectedRefs = useMemo(() => history.rows.find((row) => row.commit.oid === selectedOid)?.refs ?? [], [history.rows, selectedOid]);
-  const busy = requestState !== "idle";
+  const busy = requestState !== "idle" || changes.mutation.status === "running";
 
   return (
     <main className="app-shell" aria-busy={busy}>
@@ -199,9 +272,16 @@ function App() {
           refreshing={requestState === "refreshing"}
           onRefresh={refreshRepository}
           onViewChange={setWorkspaceView}
-          onSelect={setSelectedOid}
+          onSelect={(oid) => {
+            if (changes.mutation.status === "idle") setSelectedOid(oid);
+          }}
           onSelectChangedFile={selectChangedFile}
           onLoadMore={loadMoreHistory}
+          onStageFile={stageChangedFile}
+          onUnstageFile={unstageChangedFile}
+          onStageAll={stageEveryFile}
+          onUnstageAll={unstageEveryFile}
+          onCommit={commitStagedChanges}
         />
       )}
     </main>
@@ -217,7 +297,7 @@ function ErrorBanner({ error }: { error: OrbitError }) {
 }
 
 function RepositoryWorkspace({
-  repository, history, changes, workspaceView, selectedOid, selectedCommit, selectedRefs, refreshing, onRefresh, onViewChange, onSelect, onSelectChangedFile, onLoadMore,
+  repository, history, changes, workspaceView, selectedOid, selectedCommit, selectedRefs, refreshing, onRefresh, onViewChange, onSelect, onSelectChangedFile, onLoadMore, onStageFile, onUnstageFile, onStageAll, onUnstageAll, onCommit,
 }: {
   repository: RepositorySnapshot;
   history: HistoryState;
@@ -232,6 +312,11 @@ function RepositoryWorkspace({
   onSelect: (oid: string) => void;
   onSelectChangedFile: (file: ChangedFile, side: DiffSide) => void;
   onLoadMore: () => void;
+  onStageFile: (fileId: FileId) => Promise<boolean>;
+  onUnstageFile: (fileId: FileId) => Promise<boolean>;
+  onStageAll: () => Promise<boolean>;
+  onUnstageAll: () => Promise<boolean>;
+  onCommit: (message: string) => Promise<boolean>;
 }) {
   const headLabel = repository.head.detached ? "Detached HEAD" : (repository.head.branch ?? "Unborn branch");
   const oid = repository.head.oid?.slice(0, 8);
@@ -240,7 +325,7 @@ function RepositoryWorkspace({
     : repository.workingTree;
   return (
     <div className="workspace">
-      <section className="repository-heading"><div><p className="eyebrow">Repository</p><h1>{repository.displayName}</h1><p className="repository-path" title={repository.root}>{repository.root}</p></div><button className="button button-secondary" onClick={onRefresh} disabled={refreshing}>{refreshing ? "Refreshing..." : "Refresh"}</button></section>
+      <section className="repository-heading"><div><p className="eyebrow">Repository</p><h1>{repository.displayName}</h1><p className="repository-path" title={repository.root}>{repository.root}</p></div><button className="button button-secondary" onClick={onRefresh} disabled={refreshing || changes.mutation.status === "running"}>{refreshing ? "Refreshing..." : "Refresh"}</button></section>
       <section className="state-rail" aria-label="Current Git state"><div className="state-identity"><span className={`state-dot ${workingTree.clean ? "clean" : "dirty"}`} aria-hidden="true" /><strong>{headLabel}</strong>{oid && <code>{oid}</code>}</div><div className="state-summary"><span>{workingTree.clean ? "Working tree clean" : "Working tree changed"}</span><span>{workingTree.staged + workingTree.unstaged + workingTree.untracked} changes</span></div></section>
       <section className="change-strip" aria-label="Working tree summary"><ChangeCount label="Staged" value={workingTree.staged} /><ChangeCount label="Unstaged" value={workingTree.unstaged} /><ChangeCount label="Untracked" value={workingTree.untracked} /><ChangeCount label="Conflicted" value={workingTree.conflicted} alert /><div className="upstream-summary"><span>Upstream</span><strong>{repository.head.upstream ?? "Not configured"}</strong>{repository.head.upstream && <small>{repository.head.ahead ?? 0} ahead, {repository.head.behind ?? 0} behind</small>}</div></section>
       <div className="workspace-toolbar" role="group" aria-label="Workspace view">
@@ -251,7 +336,7 @@ function RepositoryWorkspace({
         {workspaceView === "history" ? <>
           <section className="history-panel" aria-labelledby="history-title"><div className="section-heading"><div><p className="eyebrow">History</p><h2 id="history-title">Commit graph</h2></div><span>{history.rows.length} loaded</span></div>{history.status === "loading" && history.rows.length === 0 ? <HistoryLoading /> : history.error && history.rows.length === 0 ? <HistoryError error={history.error} onRetry={onRefresh} /> : history.rows.length === 0 ? <HistoryEmpty /> : <><CommitGraph rows={history.rows} continuation={history.continuation} selectedOid={selectedOid} onSelect={onSelect} /><HistoryFooter history={history} onLoadMore={onLoadMore} onRetry={onRefresh} /></>}</section>
           <CommitDetails commit={selectedCommit} refs={selectedRefs} />
-        </> : <ChangesWorkspace changes={changes} onRefresh={onRefresh} onSelect={onSelectChangedFile} />}
+        </> : <ChangesWorkspace changes={changes} onRefresh={onRefresh} onSelect={onSelectChangedFile} onStageFile={onStageFile} onUnstageFile={onUnstageFile} onStageAll={onStageAll} onUnstageAll={onUnstageAll} onCommit={onCommit} />}
       </div>
     </div>
   );

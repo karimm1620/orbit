@@ -666,8 +666,10 @@ message, passes that message through the mutation runner's internal bounded stdi
 Output readers start before a nonblocking, cancellation-aware message writer; the operation
 deadline includes stdin delivery, and writer completion closes the pipe for EOF. Commit hooks and
 configured signing remain normal explicit-mutation behavior. Captured history is invalidated before
-commit launch; verified HEAD advancement after timeout is applied with a warning. The M3 UI remains
-deferred.
+commit launch; verified HEAD advancement after timeout is applied with a warning. M3-C consumes only
+those typed opaque-ID APIs: it retires displayed change authority on mutation start, replaces it
+only from a current receipt or a fresh refresh, keeps uncertain outcomes non-retryable, and refreshes
+history after a commit or observed HEAD movement.
 
 ---
 

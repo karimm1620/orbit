@@ -53,12 +53,12 @@
 
 ## 3. M3-C — Staging and commit UI
 
-- [ ] Add stage/unstage file controls without exposing paths or optimistic authority.
-- [ ] Add stage-all/unstage-all with explicit busy and contextual failure states.
-- [ ] Add accessible bounded commit-message input and staged summary.
-- [ ] Render applied, rejected, uncertain, stale, and refresh-required mutation feedback.
-- [ ] Replace change/history state only from current-generation mutation receipts and refreshes.
-- [ ] Preserve keyboard flow, focus visibility, repository switching, and duplicate-activation protection.
+- [x] Add stage/unstage file controls without exposing paths or optimistic authority.
+- [x] Add stage-all/unstage-all with explicit busy and contextual failure states.
+- [x] Add accessible bounded commit-message input and staged summary.
+- [x] Render applied, rejected, uncertain, stale, and refresh-required mutation feedback.
+- [x] Replace change/history state only from current-generation mutation receipts and refreshes.
+- [x] Preserve keyboard flow, focus visibility, repository switching, and duplicate-activation protection.
 
 ---
 
