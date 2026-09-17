@@ -15,9 +15,9 @@ use crate::{
     error::OrbitError,
     git::{
         ensure_mutation_state_allowed, index_lock_exists, read_detailed_status, read_file_diff,
-        read_recent_commits, read_status, run_stage_all, run_stage_file, run_unstage_all,
-        run_unstage_file, ChangeKind, CommitSummary, DiffSelection, DiffSide, FileDiff,
-        GitMutationOutput, GitMutationTermination, GitRunner, HeadSnapshot, StatusEntry,
+        read_recent_commits, read_status, run_commit, run_stage_all, run_stage_file,
+        run_unstage_all, run_unstage_file, ChangeKind, CommitSummary, DiffSelection, DiffSide,
+        FileDiff, GitMutationOutput, GitMutationTermination, GitRunner, HeadSnapshot, StatusEntry,
         StatusSnapshot, WorkingTreeSnapshot,
     },
     history_sessions::{CommitHistoryPage, CommitHistoryRegistry},
@@ -25,6 +25,7 @@ use crate::{
 };
 
 const REPOSITORY_PROBE_LIMIT: usize = 16 * 1024;
+const MAX_COMMIT_MESSAGE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -191,6 +192,43 @@ impl RepositoryRegistry {
         self.mutate_staging(repository_id, change_set_id, StagingRequest::UnstageAll)
     }
 
+    pub fn create_commit(
+        &self,
+        repository_id: &str,
+        change_set_id: &str,
+        message: &str,
+    ) -> Result<MutationReceipt, OrbitError> {
+        validate_commit_message(message)?;
+        let generation = self.changes.reserve_refresh();
+        let root = self.authorized_root(repository_id)?;
+        self.runner.require_no_lazy_fetch()?;
+        let _lease = self.mutations.acquire(repository_id)?;
+        let authority = self
+            .changes
+            .authorize_change_set(repository_id, &root, change_set_id)?;
+        let pre_status = read_detailed_status(&self.runner, &root)?;
+        ensure_mutation_state_allowed(&self.runner, &root, &pre_status)?;
+        ensure_change_set_compatible(&authority, &pre_status)?;
+        if pre_status.working_tree.staged == 0 {
+            return Err(OrbitError::commit_has_no_staged_changes());
+        }
+
+        self.changes
+            .begin_mutation(repository_id, &root, change_set_id, generation)?;
+        let output = run_commit(&self.runner, &root, message.as_bytes())?;
+        let post_status = read_detailed_status(&self.runner, &root);
+        let lock_remains = index_lock_exists(&self.runner, &root);
+        self.finish_commit_mutation(
+            repository_id,
+            &root,
+            generation,
+            pre_status,
+            post_status,
+            output,
+            lock_remains,
+        )
+    }
+
     fn mutate_staging(
         &self,
         repository_id: &str,
@@ -320,6 +358,83 @@ impl RepositoryRegistry {
             outcome,
             issue,
             repository_changes,
+            commit_oid: None,
+            refresh_required,
+            head_changed,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_commit_mutation(
+        &self,
+        repository_id: &str,
+        root: &Path,
+        generation: crate::change_sets::ChangesRefreshGeneration,
+        pre_status: StatusSnapshot,
+        post_status: Result<StatusSnapshot, OrbitError>,
+        output: GitMutationOutput,
+        lock_remains: bool,
+    ) -> Result<MutationReceipt, OrbitError> {
+        let post = post_status.ok();
+        let head_changed = post
+            .as_ref()
+            .is_some_and(|post| post.head != pre_status.head);
+        let exited_successfully = output.termination == GitMutationTermination::Exited
+            && output
+                .status
+                .as_ref()
+                .is_some_and(|status| status.success());
+        let exited_with_rejection = output.termination == GitMutationTermination::Exited
+            && output
+                .status
+                .as_ref()
+                .is_some_and(|status| !status.success());
+        let outcome = if head_changed {
+            MutationOutcome::Applied
+        } else if exited_successfully && post.is_some() {
+            MutationOutcome::Uncertain
+        } else if exited_with_rejection && post.is_some() {
+            MutationOutcome::Rejected
+        } else {
+            MutationOutcome::Uncertain
+        };
+        if head_changed {
+            self.histories.invalidate_repository(repository_id)?;
+        }
+        let commit_oid = post.as_ref().and_then(|post| {
+            if head_changed {
+                post.head.oid.clone()
+            } else {
+                None
+            }
+        });
+        let repository_changes = post.and_then(|post| {
+            self.changes
+                .install(
+                    repository_id,
+                    root,
+                    generation,
+                    post.head,
+                    post.working_tree,
+                    post.changes,
+                )
+                .ok()
+        });
+        let refresh_required = repository_changes.is_none();
+        let issue = mutation_issue(
+            MutationOperation::CreateCommit,
+            outcome,
+            output.termination,
+            &output.stderr,
+            lock_remains,
+            refresh_required,
+        );
+        Ok(MutationReceipt {
+            operation: MutationOperation::CreateCommit,
+            outcome,
+            issue,
+            repository_changes,
+            commit_oid,
             refresh_required,
             head_changed,
         })
@@ -429,6 +544,10 @@ impl PreparedMutation {
             }
             MutationOperation::StageAll => run_stage_all(runner, root),
             MutationOperation::UnstageAll => run_unstage_all(runner, root, self.unborn),
+            MutationOperation::CreateCommit => Err(OrbitError::internal(
+                "mutate_repository",
+                "A commit cannot use a staging mutation plan.",
+            )),
         }
     }
 
@@ -459,6 +578,7 @@ impl PreparedMutation {
                     && post.working_tree.conflicted == 0
             }
             MutationOperation::UnstageAll => post.working_tree.staged == 0,
+            MutationOperation::CreateCommit => false,
         }
     }
 }
@@ -625,6 +745,16 @@ fn stale_mutation() -> OrbitError {
     )
 }
 
+fn validate_commit_message(message: &str) -> Result<(), OrbitError> {
+    if message.len() > MAX_COMMIT_MESSAGE_BYTES
+        || message.as_bytes().contains(&0)
+        || !message.chars().any(|character| !character.is_whitespace())
+    {
+        return Err(OrbitError::commit_message_invalid());
+    }
+    Ok(())
+}
+
 fn mutation_issue(
     operation: MutationOperation,
     outcome: MutationOutcome,
@@ -638,6 +768,7 @@ fn mutation_issue(
         MutationOperation::UnstageFile => "unstage_file",
         MutationOperation::StageAll => "stage_all",
         MutationOperation::UnstageAll => "unstage_all",
+        MutationOperation::CreateCommit => "create_commit",
     };
     if outcome == MutationOutcome::Rejected {
         return Some(OrbitError::mutation_rejected(
@@ -3946,6 +4077,327 @@ mod tests {
         assert!(
             cached.is_empty(),
             "fail-fast override must prevent partial staging"
+        );
+    }
+
+    #[test]
+    fn creates_born_and_unborn_normal_commits_from_the_authorized_index() {
+        let born = TestRepository::new();
+        born.commit_file("base.txt", "base\n", "base");
+        born.write("next.txt", "next\n");
+        born.git_ok(["add", "--", "next.txt"]);
+        let registry = RepositoryRegistry::default();
+        let opened = registry.open(born.root.clone()).expect("open born fixture");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("changes");
+        let message = "Subject with -option\n\nUnicode β and a \\\\ slash\n";
+        let receipt = registry
+            .create_commit(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                message,
+            )
+            .expect("commit receipt");
+        assert_eq!(receipt.outcome, MutationOutcome::Applied);
+        let head = born.oid("HEAD");
+        assert_eq!(receipt.commit_oid.as_deref(), Some(head.as_str()));
+        assert_eq!(
+            born.git_output(["log", "-1", "--format=%B"]),
+            message.trim_end()
+        );
+        assert_eq!(
+            receipt
+                .repository_changes
+                .expect("post changes")
+                .summary
+                .staged,
+            0
+        );
+
+        let unborn = TestRepository::new();
+        unborn.write("first.txt", "first\n");
+        unborn.git_ok(["add", "--", "first.txt"]);
+        let opened = registry
+            .open(unborn.root.clone())
+            .expect("open unborn fixture");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("unborn changes");
+        let receipt = registry
+            .create_commit(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                "first commit",
+            )
+            .expect("unborn commit receipt");
+        assert_eq!(receipt.outcome, MutationOutcome::Applied);
+        assert!(receipt.commit_oid.is_some());
+    }
+
+    #[test]
+    fn rejects_invalid_commit_messages_and_empty_indexes_before_fencing_handles() {
+        assert_eq!(
+            validate_commit_message(" \n\t").expect_err("blank").code,
+            "commit_message_invalid"
+        );
+        assert_eq!(
+            validate_commit_message("a\0b").expect_err("nul").code,
+            "commit_message_invalid"
+        );
+        assert_eq!(
+            validate_commit_message(&"x".repeat(MAX_COMMIT_MESSAGE_BYTES + 1))
+                .expect_err("limit")
+                .code,
+            "commit_message_invalid"
+        );
+
+        let repository = TestRepository::new();
+        repository.commit_file("base.txt", "base\n", "base");
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open fixture");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("clean changes");
+        let error = registry
+            .create_commit(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                "message",
+            )
+            .expect_err("empty index");
+        assert_eq!(error.code, "commit_has_no_staged_changes");
+        registry
+            .changes
+            .authorize_change_set(
+                &opened.repository_id,
+                &repository.root,
+                changes.change_set_id.as_str(),
+            )
+            .expect("preflight rejection must retain handles");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commit_preserves_normal_hooks_and_reports_a_rejected_hook_without_moving_head() {
+        let repository = TestRepository::new();
+        repository.commit_file("base.txt", "base\n", "base");
+        repository.write("next.txt", "next\n");
+        repository.git_ok(["add", "--", "next.txt"]);
+        let hooks = repository.root.join(".git/hooks");
+        let pre_commit = hooks.join("pre-commit");
+        fs::write(&pre_commit, "#!/bin/sh\necho hook-rejected >&2\nexit 1\n").expect("hook");
+        let mut permissions = fs::metadata(&pre_commit).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&pre_commit, permissions).expect("executable hook");
+
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open fixture");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("changes");
+        let before = repository.oid("HEAD");
+        let receipt = registry
+            .create_commit(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                "message",
+            )
+            .expect("started commit returns receipt");
+        assert_eq!(receipt.outcome, MutationOutcome::Rejected);
+        assert_eq!(repository.oid("HEAD"), before);
+        assert!(receipt
+            .issue
+            .and_then(|issue| issue.details)
+            .is_some_and(|detail| detail.contains("hook-rejected")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commit_uses_fixed_message_contract_and_preserves_message_and_post_hooks() {
+        let repository = TestRepository::new();
+        repository.commit_file("base.txt", "base\n", "base");
+        repository.write("next.txt", "next\n");
+        repository.git_ok(["add", "--", "next.txt"]);
+        let hooks = repository.root.join(".git/hooks");
+        let marker = repository.root.join("post-commit-ran");
+        for (name, script) in [
+            (
+                "prepare-commit-msg",
+                "#!/bin/sh\nprintf '\\nprepare hook' >> \"$1\"\n",
+            ),
+            (
+                "commit-msg",
+                "#!/bin/sh\nprintf '\\ncommit hook' >> \"$1\"\n",
+            ),
+            ("post-commit", "#!/bin/sh\n: > post-commit-ran\n"),
+        ] {
+            let hook = hooks.join(name);
+            fs::write(&hook, script).expect("hook");
+            let mut permissions = fs::metadata(&hook).expect("metadata").permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&hook, permissions).expect("executable hook");
+        }
+        let editor = repository.root.join("editor-marker");
+        repository.write("template.txt", "template must not appear\n");
+        repository.git_ok(["config", "core.editor", &format!("{}", editor.display())]);
+        repository.git_ok(["config", "commit.template", "template.txt"]);
+        repository.git_ok(["config", "commit.cleanup", "strip"]);
+        repository.git_ok(["config", "commit.verbose", "true"]);
+
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open fixture");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("changes");
+        let receipt = registry
+            .create_commit(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                "subject\n\n body\n",
+            )
+            .expect("commit");
+        assert_eq!(receipt.outcome, MutationOutcome::Applied);
+        let message = repository.git_output(["log", "-1", "--format=%B"]);
+        assert!(message.contains("prepare hook"));
+        assert!(message.contains("commit hook"));
+        assert!(!message.contains("template must not appear"));
+        assert!(!message.contains("diff --git"));
+        assert!(!editor.exists());
+        assert!(marker.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commit_supports_detached_head_and_rejects_commit_msg_hook() {
+        let detached = TestRepository::new();
+        detached.commit_file("base.txt", "base\n", "base");
+        detached.git_ok(["checkout", "--detach", "HEAD"]);
+        detached.write("detached.txt", "next\n");
+        detached.git_ok(["add", "--", "detached.txt"]);
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(detached.root.clone())
+            .expect("open detached fixture");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("changes");
+        let receipt = registry
+            .create_commit(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                "detached",
+            )
+            .expect("commit");
+        assert_eq!(receipt.outcome, MutationOutcome::Applied);
+        assert_eq!(
+            detached.git_output(["rev-parse", "--abbrev-ref", "HEAD"]),
+            "HEAD"
+        );
+
+        let rejected = TestRepository::new();
+        rejected.commit_file("base.txt", "base\n", "base");
+        rejected.write("next.txt", "next\n");
+        rejected.git_ok(["add", "--", "next.txt"]);
+        let hook = rejected.root.join(".git/hooks/commit-msg");
+        fs::write(&hook, "#!/bin/sh\necho commit-msg-rejected >&2\nexit 1\n").expect("hook");
+        let mut permissions = fs::metadata(&hook).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&hook, permissions).expect("executable hook");
+        let opened = registry
+            .open(rejected.root.clone())
+            .expect("open rejected fixture");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("changes");
+        let before = rejected.oid("HEAD");
+        let receipt = registry
+            .create_commit(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                "rejected",
+            )
+            .expect("receipt");
+        assert_eq!(receipt.outcome, MutationOutcome::Rejected);
+        assert_eq!(rejected.oid("HEAD"), before);
+    }
+
+    #[test]
+    fn commit_rejects_stale_change_set_before_starting() {
+        let repository = TestRepository::new();
+        repository.commit_file("base.txt", "base\n", "base");
+        repository.write("next.txt", "next\n");
+        repository.git_ok(["add", "--", "next.txt"]);
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open fixture");
+        let stale = registry
+            .repository_changes(&opened.repository_id)
+            .expect("first changes");
+        let fresh = registry
+            .repository_changes(&opened.repository_id)
+            .expect("replacement changes");
+        let error = registry
+            .create_commit(
+                &opened.repository_id,
+                stale.change_set_id.as_str(),
+                "message",
+            )
+            .expect_err("stale changes");
+        assert_eq!(error.code, "change_set_unavailable");
+        registry
+            .create_commit(
+                &opened.repository_id,
+                fresh.change_set_id.as_str(),
+                "message",
+            )
+            .expect("fresh commit");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commit_preserves_configured_signing_failure() {
+        let repository = TestRepository::new();
+        repository.commit_file("base.txt", "base\n", "base");
+        repository.write("next.txt", "next\n");
+        repository.git_ok(["add", "--", "next.txt"]);
+        let signer = repository.root.join("failing-signer");
+        let marker = repository.root.join("signer-ran");
+        fs::write(&signer, "#!/bin/sh\n: > signer-ran\nexit 1\n").expect("signer");
+        let mut permissions = fs::metadata(&signer).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&signer, permissions).expect("executable signer");
+        repository.git_ok(["config", "commit.gpgSign", "true"]);
+        repository.git_ok([
+            "config",
+            "gpg.program",
+            signer.to_str().expect("UTF-8 signer"),
+        ]);
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open fixture");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("changes");
+        let receipt = registry
+            .create_commit(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                "signed",
+            )
+            .expect("receipt");
+        assert_eq!(receipt.outcome, MutationOutcome::Rejected);
+        assert!(
+            marker.exists(),
+            "configured signer must execute for explicit commit"
         );
     }
 }

@@ -326,7 +326,12 @@ optional replacement change set, never a path or process control. The Unix proce
 binding is internal to `GitRunner`; it does not add an IPC or Tauri capability. Regression tests
 cover inherited `GIT_*` scrubbing, literal byte paths, filter/index-hook execution after explicit
 intent, fsmonitor neutralization, output/deadline cleanup, lock preservation, and stale-generation
-fencing. Commit execution remains unavailable in this slice.
+fencing. M3-B2 adds only `create_commit(repository_id, change_set_id, message)`: Rust rejects
+blank, NUL, or over-64-KiB messages and sends accepted UTF-8 bytes through Git stdin, never an
+argument, shell, or Orbit temporary file. The fixed commit keeps hooks and configured signing
+enabled after explicit user intent, retains fsmonitor/pager/lazy-fetch/environment hardening,
+verifies post-state HEAD, and invalidates history on movement. No UI or capability expansion is
+introduced.
 
 ---
 

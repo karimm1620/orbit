@@ -204,7 +204,8 @@ export type MutationOperation =
   | "stageFile"
   | "unstageFile"
   | "stageAll"
-  | "unstageAll";
+  | "unstageAll"
+  | "createCommit";
 
 export type MutationOutcome = "applied" | "rejected" | "uncertain";
 
@@ -213,6 +214,7 @@ export type MutationReceipt = {
   outcome: MutationOutcome;
   issue?: OrbitError;
   repositoryChanges?: RepositoryChanges;
+  commitOid?: string;
   refreshRequired: boolean;
   headChanged: boolean;
 };
@@ -290,6 +292,18 @@ export function unstageAll(
   return invoke<MutationReceipt>("unstage_all", {
     repositoryId,
     changeSetId,
+  });
+}
+
+export function createCommit(
+  repositoryId: RepositoryId,
+  changeSetId: ChangeSetId,
+  message: string,
+): Promise<MutationReceipt> {
+  return invoke<MutationReceipt>("create_commit", {
+    repositoryId,
+    changeSetId,
+    message,
   });
 }
 

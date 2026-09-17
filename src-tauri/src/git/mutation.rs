@@ -15,6 +15,7 @@ use super::{GitMutationOutput, GitRunner, StatusSnapshot};
 const MUTATION_STDOUT_LIMIT: usize = 1024 * 1024;
 const MUTATION_PROBE_LIMIT: usize = 16 * 1024;
 const STAGING_DEADLINE: Duration = Duration::from_secs(120);
+const COMMIT_DEADLINE: Duration = Duration::from_secs(300);
 const TERMINATION_GRACE: Duration = Duration::from_secs(2);
 
 const PSEUDOREFS: [&str; 4] = [
@@ -31,6 +32,36 @@ pub(crate) enum StagingOperation {
     UnstageFile,
     StageAll,
     UnstageAll,
+}
+
+pub(crate) fn run_commit(
+    runner: &GitRunner,
+    root: &Path,
+    message: &[u8],
+) -> Result<GitMutationOutput, OrbitError> {
+    let args = [
+        "-c",
+        "core.fsmonitor=false",
+        "--no-pager",
+        "--no-lazy-fetch",
+        "--no-optional-locks",
+        "commit",
+        "--quiet",
+        "--no-status",
+        "--no-verbose",
+        "--cleanup=verbatim",
+        "--file=-",
+    ]
+    .map(OsString::from);
+    runner.run_mutation_with_stdin(
+        root,
+        "create_commit",
+        args,
+        MUTATION_STDOUT_LIMIT,
+        COMMIT_DEADLINE,
+        TERMINATION_GRACE,
+        Some(message),
+    )
 }
 
 impl StagingOperation {

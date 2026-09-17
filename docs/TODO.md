@@ -40,14 +40,14 @@
 
 ## 2. M3-B2 — Normal commit service
 
-- [ ] Add bounded stdin writing and strict NUL/blank/64-KiB message validation without trimming accepted text.
-- [ ] Reuse the fixed operation-state guard and add staged-content commit eligibility.
-- [ ] Require fresh staged content and reject unresolved conflicts or unsupported continuation state.
-- [ ] Implement index-only normal commit without editor, amend, paths, `-a`, empty commit, or hook bypass.
-- [ ] Preserve and test pre-commit, prepare-commit-msg, commit-msg, post-commit, and configured signing behavior.
-- [ ] Compare pre/post HEAD, invalidate stale history, and distinguish completed commit from uncertain process outcome.
-- [ ] Cover unborn and detached commits, hook message changes/rejections, signing failure, output bounds, timeout, stale state, and external index races.
-- [ ] Add purpose-specific commit IPC and matching TypeScript wrapper.
+- [x] Add bounded stdin writing and strict NUL/blank/64-KiB message validation without trimming accepted text.
+- [x] Reuse the fixed operation-state guard and add staged-content commit eligibility.
+- [x] Require fresh staged content and reject unresolved conflicts or unsupported continuation state.
+- [x] Implement index-only normal commit without editor, amend, paths, `-a`, empty commit, or hook bypass.
+- [x] Preserve and test pre-commit, prepare-commit-msg, commit-msg, post-commit, and configured signing behavior.
+- [x] Compare pre/post HEAD, invalidate stale history, and distinguish completed commit from uncertain process outcome.
+- [x] Cover unborn and detached commits, hook message changes/rejections, signing failure, output bounds, timeout, stale state, and external index races.
+- [x] Add purpose-specific commit IPC and matching TypeScript wrapper.
 
 ---
 

@@ -657,7 +657,11 @@ starts, and a successful post-operation detailed-status read installs the only n
 change set returned in the receipt. The mutation-mode `GitRunner` uses a small direct Unix `libc`
 binding solely for process-group TERM/KILL signalling; process launch, environment scrubbing,
 output bounds, waiting, and reaping remain inside the existing runner. Commit-message stdin and
-commit creation remain deferred to M3-B2.
+M3-B2 adds fixed `create_commit` IPC. It accepts only repository/change-set IDs and a validated
+message, passes that message through the mutation runner's internal bounded stdin pipe to
+`git commit --file=- --cleanup=verbatim`, and returns the verified new HEAD OID when applied.
+Commit hooks and configured signing remain normal explicit-mutation behavior; post-state HEAD
+movement invalidates history sessions. The M3 UI remains deferred.
 
 ---
 

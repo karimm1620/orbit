@@ -179,6 +179,21 @@ pub async fn unstage_all(
     .map_err(|_| mutation_worker_error("unstage_all"))?
 }
 
+#[tauri::command]
+pub async fn create_commit(
+    repository_id: String,
+    change_set_id: String,
+    message: String,
+    repositories: State<'_, Arc<RepositoryRegistry>>,
+) -> Result<MutationReceipt, OrbitError> {
+    let repositories = Arc::clone(&repositories);
+    tauri::async_runtime::spawn_blocking(move || {
+        repositories.create_commit(&repository_id, &change_set_id, &message)
+    })
+    .await
+    .map_err(|_| mutation_worker_error("create_commit"))?
+}
+
 fn mutation_worker_error(operation: &'static str) -> OrbitError {
     OrbitError::internal(
         operation,

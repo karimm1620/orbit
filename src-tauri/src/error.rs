@@ -160,6 +160,28 @@ impl OrbitError {
         }
     }
 
+    pub fn commit_message_invalid() -> Self {
+        Self {
+            code: "commit_message_invalid",
+            title: "Commit message is not valid",
+            message: "Enter a nonblank UTF-8 commit message up to 64 KiB without embedded NUL characters.".into(),
+            operation: "create_commit",
+            recoverable: true,
+            details: None,
+        }
+    }
+
+    pub fn commit_has_no_staged_changes() -> Self {
+        Self {
+            code: "commit_has_no_staged_changes",
+            title: "No staged changes to commit",
+            message: "Stage at least one change before creating a commit.".into(),
+            operation: "create_commit",
+            recoverable: true,
+            details: None,
+        }
+    }
+
     pub fn mutation_rejected(operation: &'static str, stderr: &[u8], lock_remains: bool) -> Self {
         Self::mutation_diagnostic(
             "mutation_rejected",

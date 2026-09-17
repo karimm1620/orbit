@@ -17,7 +17,7 @@ pub use graph::{
 };
 pub use history::{read_recent_commits, CommitSummary};
 pub(crate) use mutation::{
-    ensure_mutation_state_allowed, index_lock_exists, run_stage_all, run_stage_file,
+    ensure_mutation_state_allowed, index_lock_exists, run_commit, run_stage_all, run_stage_file,
     run_unstage_all, run_unstage_file,
 };
 pub use process::GitRunner;

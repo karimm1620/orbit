@@ -13,6 +13,7 @@ pub enum MutationOperation {
     UnstageFile,
     StageAll,
     UnstageAll,
+    CreateCommit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -32,6 +33,8 @@ pub struct MutationReceipt {
     pub issue: Option<OrbitError>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repository_changes: Option<RepositoryChanges>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_oid: Option<String>,
     pub refresh_required: bool,
     pub head_changed: bool,
 }

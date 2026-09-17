@@ -182,6 +182,34 @@ impl GitRunner {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
+        self.run_mutation_with_stdin(
+            current_dir,
+            operation,
+            args,
+            stdout_limit,
+            deadline,
+            termination_grace,
+            None,
+        )
+    }
+
+    /// Internal-only mutation mode. Callers provide only a fixed operation's
+    /// bounded data payload; this is not an IPC or generic process API.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn run_mutation_with_stdin<I, S>(
+        &self,
+        current_dir: &Path,
+        operation: &'static str,
+        args: I,
+        stdout_limit: usize,
+        deadline: Duration,
+        termination_grace: Duration,
+        stdin_data: Option<&[u8]>,
+    ) -> Result<GitMutationOutput, OrbitError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
         #[cfg(test)]
         let deadline = self.mutation_deadline_override.unwrap_or(deadline);
 
@@ -189,7 +217,11 @@ impl GitRunner {
         command
             .args(args)
             .current_dir(current_dir)
-            .stdin(Stdio::null())
+            .stdin(if stdin_data.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -209,6 +241,19 @@ impl GitRunner {
         let mut child = command
             .spawn()
             .map_err(|error| OrbitError::git_spawn(operation, &error))?;
+        if let Some(stdin_data) = stdin_data {
+            use std::io::Write;
+
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| OrbitError::internal(operation, "Git stdin was unavailable."))?;
+            stdin
+                .write_all(stdin_data)
+                .map_err(|error| OrbitError::internal(operation, error.to_string()))?;
+            // Closing the pipe is required so `--file=-` observes EOF.
+            drop(stdin);
+        }
         let stdout = child
             .stdout
             .take()
