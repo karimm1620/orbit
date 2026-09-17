@@ -215,6 +215,9 @@ impl RepositoryRegistry {
 
         self.changes
             .begin_mutation(repository_id, &root, change_set_id, generation)?;
+        // Fence captured history before starting a commit: once Git starts,
+        // failed post-status cannot prove that the old HEAD is still current.
+        self.histories.invalidate_repository(repository_id)?;
         let output = run_commit(&self.runner, &root, message.as_bytes())?;
         let post_status = read_detailed_status(&self.runner, &root);
         let lock_remains = index_lock_exists(&self.runner, &root);
@@ -398,9 +401,6 @@ impl RepositoryRegistry {
         } else {
             MutationOutcome::Uncertain
         };
-        if head_changed {
-            self.histories.invalidate_repository(repository_id)?;
-        }
         let commit_oid = post.as_ref().and_then(|post| {
             if head_changed {
                 post.head.oid.clone()
@@ -802,6 +802,16 @@ fn mutation_issue(
     }
     if refresh_required {
         return Some(OrbitError::post_mutation_refresh_failed(operation_name));
+    }
+    if operation == MutationOperation::CreateCommit && termination != GitMutationTermination::Exited
+    {
+        let mut warning = OrbitError::mutation_warning(operation_name, stderr, lock_remains);
+        warning.message = match termination {
+            GitMutationTermination::TimedOut => "HEAD advanced, but Git exceeded Orbit's commit deadline. The commit was applied; inspect repository state before continuing.",
+            GitMutationTermination::OutputTooLarge => "HEAD advanced, but Git exceeded Orbit's output bound. The commit was applied; inspect repository state before continuing.",
+            _ => "HEAD advanced, but Orbit could not complete Git process I/O. The commit was applied; inspect repository state before continuing.",
+        }.into();
+        return Some(warning);
     }
     if !stderr.is_empty() || lock_remains {
         return Some(OrbitError::mutation_warning(
@@ -4399,5 +4409,323 @@ mod tests {
             marker.exists(),
             "configured signer must execute for explicit commit"
         );
+    }
+
+    #[cfg(unix)]
+    fn commit_lifecycle_fixture(
+        hook_name: &str,
+        script: &str,
+    ) -> (
+        TestRepository,
+        RepositoryRegistry,
+        String,
+        RepositoryChanges,
+        String,
+    ) {
+        let repository = TestRepository::new();
+        repository.commit_file("base.txt", "base\n", "Base");
+        repository.commit_file("second.txt", "second\n", "Second");
+        repository.write("next.txt", "next\n");
+        repository.git_ok(["add", "--", "next.txt"]);
+        let hook = repository.git_path(&format!("hooks/{hook_name}"));
+        fs::write(&hook, script).expect("write lifecycle hook");
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).expect("executable hook");
+        let runner = GitRunner::default().with_mutation_deadline(Duration::from_millis(500));
+        #[cfg(target_os = "linux")]
+        let runner = runner.with_mutation_pipe_capacity(4096);
+        let registry = RepositoryRegistry::with_runner(runner);
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open fixture");
+        let cursor = registry
+            .commit_history_page(&opened.repository_id, None, Some(1))
+            .expect("history snapshot")
+            .next_cursor
+            .expect("old history cursor")
+            .as_str()
+            .to_owned();
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("changes");
+        (repository, registry, opened.repository_id, changes, cursor)
+    }
+
+    #[cfg(unix)]
+    fn assert_commit_authority_retired(
+        repository: &TestRepository,
+        registry: &RepositoryRegistry,
+        repository_id: &str,
+        changes: &RepositoryChanges,
+        cursor: &str,
+    ) {
+        assert_eq!(
+            registry
+                .changes
+                .authorize_change_set(
+                    repository_id,
+                    &repository.root,
+                    changes.change_set_id.as_str(),
+                )
+                .expect_err("old changes retired")
+                .code,
+            "change_set_unavailable",
+        );
+        assert_eq!(
+            registry
+                .commit_history_page(repository_id, Some(cursor), Some(1))
+                .expect_err("old history retired even without proven HEAD movement")
+                .code,
+            "history_session_unavailable",
+        );
+        assert_eq!(
+            fs::read_to_string(repository.git_path("orbit-hook-runs")).expect("hook count"),
+            "run\n",
+            "a started commit must never be retried automatically",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commit_large_stdin_and_hook_output_share_the_mutation_deadline() {
+        let (repository, registry, id, changes, cursor) = commit_lifecycle_fixture(
+            "pre-commit",
+            // Git runs pre-commit before consuming --file=-. Both pipes exceed
+            // the explicit 4-KiB test pipes, reproducing the old write ordering.
+            "#!/bin/sh\necho run >> .git/orbit-hook-runs\ntrap 'wait; exit 0' TERM\nsleep 30 &\necho $! > .git/orbit-descendant\ndd if=/dev/zero bs=1024 count=48 2>/dev/null\nwait\n",
+        );
+        let before = repository.oid("HEAD");
+        let message = "x".repeat(MAX_COMMIT_MESSAGE_BYTES);
+        let started = std::time::Instant::now();
+        let receipt = registry
+            .create_commit(&id, changes.change_set_id.as_str(), &message)
+            .expect("started timeout returns receipt rather than a stdin error");
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "stdin cannot bypass the deadline"
+        );
+        assert_eq!(receipt.outcome, MutationOutcome::Uncertain);
+        assert_eq!(
+            receipt.issue.as_ref().map(|issue| issue.code),
+            Some("mutation_timed_out")
+        );
+        assert!(!receipt.head_changed);
+        assert!(receipt.commit_oid.is_none());
+        assert_eq!(repository.oid("HEAD"), before);
+        assert_eq!(
+            receipt
+                .repository_changes
+                .as_ref()
+                .expect("post status")
+                .summary
+                .staged,
+            1
+        );
+        assert_commit_authority_retired(&repository, &registry, &id, &changes, &cursor);
+        let pid =
+            fs::read_to_string(repository.git_path("orbit-descendant")).expect("descendant PID");
+        wait_for_process_exit(pid.trim());
+    }
+
+    #[cfg(unix)]
+    fn wait_for_process_exit(pid: &str) {
+        let path = Path::new("/proc").join(pid);
+        for _ in 0..100 {
+            if !path.exists() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("ordinary commit descendant {pid} was not cleaned up");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commit_hook_output_overflow_cancels_large_stdin_without_retry() {
+        let (repository, registry, id, changes, cursor) = commit_lifecycle_fixture(
+            "pre-commit",
+            "#!/bin/sh\necho run >> .git/orbit-hook-runs\ndd if=/dev/zero bs=1024 count=128 >&2 2>/dev/null\nsleep 30\n",
+        );
+        let before = repository.oid("HEAD");
+        let started = std::time::Instant::now();
+        let receipt = registry
+            .create_commit(
+                &id,
+                changes.change_set_id.as_str(),
+                &"x".repeat(MAX_COMMIT_MESSAGE_BYTES),
+            )
+            .expect("output cancellation receipt");
+        assert!(started.elapsed() < Duration::from_secs(4));
+        assert_eq!(receipt.outcome, MutationOutcome::Uncertain);
+        let issue = receipt.issue.as_ref().expect("output diagnostic");
+        assert_eq!(issue.code, "mutation_outcome_uncertain");
+        assert!(issue.message.contains("more output"));
+        assert!(issue
+            .details
+            .as_ref()
+            .is_none_or(|detail| detail.chars().count() <= 512));
+        assert!(!receipt.head_changed);
+        assert_eq!(repository.oid("HEAD"), before);
+        assert_commit_authority_retired(&repository, &registry, &id, &changes, &cursor);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commit_timeout_kills_term_resistant_hook_after_git_exits() {
+        let (repository, registry, id, changes, cursor) = commit_lifecycle_fixture(
+            "pre-commit",
+            "#!/bin/sh\necho run >> .git/orbit-hook-runs\ntrap '' TERM\necho $$ > .git/orbit-hook-pid\nsleep 30 &\necho $! > .git/orbit-descendant\nwait\n",
+        );
+        let before = repository.oid("HEAD");
+        let started = std::time::Instant::now();
+        let receipt = registry
+            .create_commit(
+                &id,
+                changes.change_set_id.as_str(),
+                &"x".repeat(MAX_COMMIT_MESSAGE_BYTES),
+            )
+            .expect("resistant hook timeout receipt");
+        assert!(started.elapsed() < Duration::from_secs(4));
+        assert_eq!(receipt.outcome, MutationOutcome::Uncertain);
+        assert_eq!(
+            receipt.issue.as_ref().map(|issue| issue.code),
+            Some("mutation_timed_out")
+        );
+        assert_eq!(repository.oid("HEAD"), before);
+        for name in ["orbit-hook-pid", "orbit-descendant"] {
+            let pid = fs::read_to_string(repository.git_path(name)).expect("process PID");
+            wait_for_process_exit(pid.trim());
+        }
+        assert_commit_authority_retired(&repository, &registry, &id, &changes, &cursor);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commit_post_hook_timeout_reports_verified_head_with_warning_and_preserves_lock() {
+        let (repository, registry, id, changes, cursor) = commit_lifecycle_fixture(
+            "post-commit",
+            "#!/bin/sh\necho run >> .git/orbit-hook-runs\necho owned-by-fixture > .git/index.lock\ntrap 'wait; exit 0' TERM\nsleep 30 &\necho $! > .git/orbit-descendant\nwait\n",
+        );
+        let before = repository.oid("HEAD");
+        let receipt = registry
+            .create_commit(
+                &id,
+                changes.change_set_id.as_str(),
+                "Applied before timeout",
+            )
+            .expect("late timeout receipt");
+        let after = repository.oid("HEAD");
+        assert_ne!(before, after);
+        assert_eq!(receipt.outcome, MutationOutcome::Applied);
+        assert!(receipt.head_changed);
+        assert_eq!(receipt.commit_oid.as_deref(), Some(after.as_str()));
+        let issue = receipt
+            .issue
+            .as_ref()
+            .expect("silent late timeout must warn");
+        assert_eq!(issue.code, "mutation_warning");
+        assert!(issue.message.contains("deadline"));
+        assert!(issue
+            .details
+            .as_ref()
+            .expect("lock detail")
+            .contains("did not remove"));
+        assert_eq!(
+            fs::read_to_string(repository.git_path("index.lock")).expect("lock remains"),
+            "owned-by-fixture\n"
+        );
+        assert_commit_authority_retired(&repository, &registry, &id, &changes, &cursor);
+        let pid =
+            fs::read_to_string(repository.git_path("orbit-descendant")).expect("descendant PID");
+        wait_for_process_exit(pid.trim());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commit_unavailable_post_state_retires_history_without_claiming_head_changed() {
+        let (repository, registry, id, changes, cursor) = commit_lifecycle_fixture(
+            "post-commit",
+            // A legal filter name containing '=' makes protected status fail
+            // closed. This exercises real Git mutation and real refresh failure.
+            "#!/bin/sh\necho run >> .git/orbit-hook-runs\ngit config 'filter.orbit=unavailable.clean' cat\n",
+        );
+        let before = repository.oid("HEAD");
+        let receipt = registry
+            .create_commit(
+                &id,
+                changes.change_set_id.as_str(),
+                "Post-state unavailable",
+            )
+            .expect("uncertain receipt");
+        assert_ne!(
+            repository.oid("HEAD"),
+            before,
+            "commit really advanced HEAD"
+        );
+        assert_eq!(receipt.outcome, MutationOutcome::Uncertain);
+        assert!(receipt.refresh_required);
+        assert!(receipt.repository_changes.is_none());
+        assert!(
+            !receipt.head_changed,
+            "unobserved HEAD movement must not be claimed"
+        );
+        assert!(receipt.commit_oid.is_none());
+        assert_commit_authority_retired(&repository, &registry, &id, &changes, &cursor);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commit_large_message_reaches_eof_after_hook_output_is_drained() {
+        let (repository, registry, id, changes, cursor) = commit_lifecycle_fixture(
+            "pre-commit",
+            "#!/bin/sh\necho run >> .git/orbit-hook-runs\ndd if=/dev/zero bs=1024 count=48 2>/dev/null\n",
+        );
+        let message = format!("{}\n", "x".repeat(MAX_COMMIT_MESSAGE_BYTES - 1));
+        let receipt = registry
+            .create_commit(&id, changes.change_set_id.as_str(), &message)
+            .expect("commit must receive EOF");
+        assert_eq!(receipt.outcome, MutationOutcome::Applied);
+        assert_eq!(
+            repository.git_bytes(["log", "-1", "--format=%B"]),
+            format!("{message}\n").as_bytes()
+        );
+        assert_commit_authority_retired(&repository, &registry, &id, &changes, &cursor);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commit_external_index_race_returns_actual_post_state_and_retires_authority() {
+        let (repository, registry, id, changes, cursor) = commit_lifecycle_fixture(
+            "pre-commit",
+            "#!/bin/sh\necho run >> .git/orbit-hook-runs\n: > .git/orbit-hook-entered\nwhile [ ! -e .git/orbit-hook-release ]; do sleep 0.01; done\n",
+        );
+        let before = repository.oid("HEAD");
+        thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                registry.create_commit(&id, changes.change_set_id.as_str(), "Raced index")
+            });
+            wait_for_path(&repository.git_path("orbit-hook-entered"));
+            repository.git_ok(["reset", "--mixed", "--no-refresh", "HEAD"]);
+            fs::write(repository.git_path("orbit-hook-release"), b"release").expect("release hook");
+            let receipt = worker.join().expect("commit worker").expect("race receipt");
+            assert_eq!(receipt.outcome, MutationOutcome::Applied);
+            assert!(receipt.head_changed);
+            assert_eq!(
+                receipt.commit_oid.as_deref(),
+                Some(repository.oid("HEAD").as_str())
+            );
+            let actual = read_detailed_status(&GitRunner::default(), &repository.root)
+                .expect("actual post state");
+            assert_eq!(
+                receipt
+                    .repository_changes
+                    .as_ref()
+                    .expect("post state")
+                    .summary,
+                actual.working_tree
+            );
+        });
+        assert_ne!(repository.oid("HEAD"), before);
+        assert_eq!(repository.git_output(["rev-list", "--count", "HEAD"]), "3");
+        assert_commit_authority_retired(&repository, &registry, &id, &changes, &cursor);
     }
 }

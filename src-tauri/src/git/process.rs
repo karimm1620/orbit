@@ -1,7 +1,7 @@
 use std::{
     env,
     ffi::{OsStr, OsString},
-    io::{self, Read},
+    io::{self, Read, Write},
     path::Path,
     process::{Command, ExitStatus, Stdio},
     sync::{
@@ -53,6 +53,8 @@ pub struct GitRunner {
     restore_no_lazy_fetch_environment: bool,
     #[cfg(test)]
     mutation_deadline_override: Option<Duration>,
+    #[cfg(all(test, target_os = "linux"))]
+    mutation_pipe_capacity: Option<i32>,
 }
 
 impl Default for GitRunner {
@@ -66,6 +68,8 @@ impl Default for GitRunner {
             restore_no_lazy_fetch_environment: true,
             #[cfg(test)]
             mutation_deadline_override: None,
+            #[cfg(all(test, target_os = "linux"))]
+            mutation_pipe_capacity: None,
         }
     }
 }
@@ -79,6 +83,8 @@ impl GitRunner {
             environment: Vec::new(),
             restore_no_lazy_fetch_environment: true,
             mutation_deadline_override: None,
+            #[cfg(target_os = "linux")]
+            mutation_pipe_capacity: None,
         }
     }
 
@@ -101,6 +107,12 @@ impl GitRunner {
     #[cfg(test)]
     pub fn with_mutation_deadline(mut self, deadline: Duration) -> Self {
         self.mutation_deadline_override = Some(deadline);
+        self
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    pub fn with_mutation_pipe_capacity(mut self, capacity: i32) -> Self {
+        self.mutation_pipe_capacity = Some(capacity);
         self
     }
 
@@ -213,6 +225,14 @@ impl GitRunner {
         #[cfg(test)]
         let deadline = self.mutation_deadline_override.unwrap_or(deadline);
 
+        #[cfg(not(unix))]
+        if stdin_data.is_some() {
+            return Err(OrbitError::unsupported(
+                operation,
+                "Bounded commit stdin is not supported on this platform.",
+            ));
+        }
+
         let mut command = Command::new(&self.executable);
         command
             .args(args)
@@ -238,21 +258,26 @@ impl GitRunner {
             command.env(NO_LAZY_FETCH_ENVIRONMENT, "1");
         }
 
+        let started = Instant::now();
         let mut child = command
             .spawn()
             .map_err(|error| OrbitError::git_spawn(operation, &error))?;
-        if let Some(stdin_data) = stdin_data {
-            use std::io::Write;
-
-            let mut stdin = child
-                .stdin
-                .take()
-                .ok_or_else(|| OrbitError::internal(operation, "Git stdin was unavailable."))?;
-            stdin
-                .write_all(stdin_data)
-                .map_err(|error| OrbitError::internal(operation, error.to_string()))?;
-            // Closing the pipe is required so `--file=-` observes EOF.
-            drop(stdin);
+        #[cfg(all(test, target_os = "linux"))]
+        if let Some(capacity) = self.mutation_pipe_capacity {
+            for descriptor in [
+                child.stdin.as_ref().map(AsRawFd::as_raw_fd),
+                child.stdout.as_ref().map(AsRawFd::as_raw_fd),
+                child.stderr.as_ref().map(AsRawFd::as_raw_fd),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                assert_eq!(
+                    unsafe { libc::fcntl(descriptor, libc::F_SETPIPE_SZ, capacity) },
+                    capacity,
+                    "deterministic test pipe capacity"
+                );
+            }
         }
         let stdout = child
             .stdout
@@ -265,6 +290,7 @@ impl GitRunner {
 
         let cancelled = Arc::new(AtomicBool::new(false));
         let output_exceeded = Arc::new(AtomicBool::new(false));
+        let io_failed = Arc::new(AtomicBool::new(false));
         let stdout_done = Arc::new(AtomicBool::new(false));
         let stderr_done = Arc::new(AtomicBool::new(false));
         let stdout_reader = spawn_mutation_reader(
@@ -273,6 +299,7 @@ impl GitRunner {
             Arc::clone(&cancelled),
             Arc::clone(&output_exceeded),
             Arc::clone(&stdout_done),
+            Arc::clone(&io_failed),
         );
         let stderr_reader = spawn_mutation_reader(
             stderr,
@@ -280,21 +307,56 @@ impl GitRunner {
             Arc::clone(&cancelled),
             Arc::clone(&output_exceeded),
             Arc::clone(&stderr_done),
+            Arc::clone(&io_failed),
         );
 
-        let (status, mut termination) =
-            wait_for_mutation_child(&mut child, deadline, termination_grace, &output_exceeded);
+        // Readers are already draining before message delivery starts. The writer
+        // uses nonblocking I/O so even an escaped helper retaining stdin cannot
+        // prevent its join after cancellation.
+        #[cfg(unix)]
+        let stdin_writer = stdin_data.map(|data| {
+            spawn_mutation_writer(
+                child.stdin.take(),
+                data.to_vec(),
+                Arc::clone(&cancelled),
+                Arc::clone(&io_failed),
+            )
+        });
+
+        let (status, mut termination) = wait_for_mutation_child(
+            &mut child,
+            started,
+            deadline,
+            termination_grace,
+            &output_exceeded,
+            &io_failed,
+        );
         wait_for_mutation_readers(&stdout_done, &stderr_done, MUTATION_READER_GRACE);
         cancelled.store(true, Ordering::Release);
+        #[cfg(unix)]
+        if let Some(writer) = stdin_writer {
+            if !matches!(writer.join(), Ok(Ok(()))) {
+                io_failed.store(true, Ordering::Release);
+            }
+        }
         let stdout = join_mutation_reader(stdout_reader);
         let stderr = join_mutation_reader(stderr_reader);
+
+        // A fast exit can win the race with a reader detecting overflow.
+        if output_exceeded.load(Ordering::Acquire) && termination == GitMutationTermination::Exited
+        {
+            terminate_mutation_process(&mut child, termination_grace);
+            termination = GitMutationTermination::OutputTooLarge;
+        }
 
         let stdout_failed = stdout.is_err();
         let (stderr, stderr_failed) = match stderr {
             Ok(read) => (read.bytes, false),
             Err(_) => (Vec::new(), true),
         };
-        if (stdout_failed || stderr_failed) && termination == GitMutationTermination::Exited {
+        if (stdout_failed || stderr_failed || io_failed.load(Ordering::Acquire))
+            && termination == GitMutationTermination::Exited
+        {
             termination = GitMutationTermination::RunnerFailed;
         }
 
@@ -429,12 +491,25 @@ fn wait_for_child(
 
 fn wait_for_mutation_child(
     child: &mut std::process::Child,
+    started: Instant,
     deadline: Duration,
     termination_grace: Duration,
     output_exceeded: &AtomicBool,
+    io_failed: &AtomicBool,
 ) -> (Option<ExitStatus>, GitMutationTermination) {
-    let started = Instant::now();
     loop {
+        if io_failed.load(Ordering::Acquire) {
+            return (
+                terminate_mutation_process(child, termination_grace),
+                GitMutationTermination::RunnerFailed,
+            );
+        }
+        if output_exceeded.load(Ordering::Acquire) {
+            return (
+                terminate_mutation_process(child, termination_grace),
+                GitMutationTermination::OutputTooLarge,
+            );
+        }
         match child.try_wait() {
             Ok(Some(status)) => return (Some(status), GitMutationTermination::Exited),
             Ok(None) => {}
@@ -446,12 +521,6 @@ fn wait_for_mutation_child(
             }
         }
 
-        if output_exceeded.load(Ordering::Acquire) {
-            return (
-                terminate_mutation_process(child, termination_grace),
-                GitMutationTermination::OutputTooLarge,
-            );
-        }
         if started.elapsed() >= deadline {
             return (
                 terminate_mutation_process(child, termination_grace),
@@ -468,16 +537,35 @@ fn terminate_mutation_process(
 ) -> Option<ExitStatus> {
     signal_process_group(child, TerminationSignal::Terminate);
     let grace_started = Instant::now();
+    let mut status = None;
     while grace_started.elapsed() < termination_grace {
         match child.try_wait() {
-            Ok(Some(status)) => return Some(status),
-            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Ok(Some(exited)) => {
+                status = Some(exited);
+                // Git exiting after TERM does not prove its helpers exited.
+                if !mutation_process_group_exists(child) {
+                    return status;
+                }
+            }
+            Ok(None) => {}
             Err(_) => break,
         }
+        thread::sleep(Duration::from_millis(10));
     }
 
     signal_process_group(child, TerminationSignal::Kill);
-    child.wait().ok()
+    child.wait().ok().or(status)
+}
+
+#[cfg(unix)]
+fn mutation_process_group_exists(child: &std::process::Child) -> bool {
+    // Signal zero only probes the runner-owned group; it does not signal it.
+    unsafe { libc::kill(-(child.id() as libc::pid_t), 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn mutation_process_group_exists(_child: &std::process::Child) -> bool {
+    false
 }
 
 enum TerminationSignal {
@@ -544,12 +632,16 @@ fn spawn_mutation_reader<R>(
     cancelled: Arc<AtomicBool>,
     exceeded: Arc<AtomicBool>,
     done: Arc<AtomicBool>,
+    failed: Arc<AtomicBool>,
 ) -> thread::JoinHandle<io::Result<BoundedRead>>
 where
     R: Read + AsRawFd + Send + 'static,
 {
     thread::spawn(move || {
         let result = read_bounded_cancellable(reader, limit, &cancelled, &exceeded);
+        if result.is_err() {
+            failed.store(true, Ordering::Release);
+        }
         done.store(true, Ordering::Release);
         result
     })
@@ -562,15 +654,72 @@ fn spawn_mutation_reader<R>(
     cancelled: Arc<AtomicBool>,
     exceeded: Arc<AtomicBool>,
     done: Arc<AtomicBool>,
+    failed: Arc<AtomicBool>,
 ) -> thread::JoinHandle<io::Result<BoundedRead>>
 where
     R: Read + Send + 'static,
 {
     thread::spawn(move || {
         let result = read_bounded_cancellable(reader, limit, &cancelled, &exceeded);
+        if result.is_err() {
+            failed.store(true, Ordering::Release);
+        }
         done.store(true, Ordering::Release);
         result
     })
+}
+
+#[cfg(unix)]
+fn spawn_mutation_writer(
+    stdin: Option<std::process::ChildStdin>,
+    data: Vec<u8>,
+    cancelled: Arc<AtomicBool>,
+    failed: Arc<AtomicBool>,
+) -> thread::JoinHandle<io::Result<()>> {
+    thread::spawn(move || {
+        let result = (|| {
+            let mut stdin = stdin.ok_or_else(|| io::Error::other("Git stdin was unavailable"))?;
+            set_nonblocking(&stdin)?;
+            let mut remaining = data.as_slice();
+            while !remaining.is_empty() {
+                if cancelled.load(Ordering::Acquire) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "Git stdin cancelled",
+                    ));
+                }
+                match stdin.write(remaining) {
+                    Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+                    Ok(written) => remaining = &remaining[written..],
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) => return Err(error),
+                }
+            }
+            // Drop closes stdin on success, failure, and cancellation; --file=-
+            // observes EOF after the complete message without an extra buffer.
+            Ok(())
+        })();
+        if result.is_err() {
+            failed.store(true, Ordering::Release);
+        }
+        result
+    })
+}
+
+#[cfg(unix)]
+fn set_nonblocking(pipe: &impl AsRawFd) -> io::Result<()> {
+    let descriptor = pipe.as_raw_fd();
+    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -583,14 +732,7 @@ fn read_bounded_cancellable<R>(
 where
     R: Read + AsRawFd,
 {
-    let descriptor = reader.as_raw_fd();
-    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
-    if flags < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
+    set_nonblocking(&reader)?;
 
     let mut bytes = Vec::with_capacity(limit.min(64 * 1024));
     let mut buffer = [0_u8; 8 * 1024];
@@ -611,6 +753,7 @@ where
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(2));
             }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(error),
         }
     }

@@ -667,12 +667,17 @@ git-am/sequencer, or squash-merge state. Detached and unborn normal commits are 
 Use a process-local mutation registry with one in-flight action per repository and four across the
 process. Hold no registry mutex during Git I/O. Beginning a mutation advances the change-set
 generation and retires the authorizing handles; every started operation attempts to install fresh
-detailed status afterward. HEAD movement invalidates M1 history sessions.
+detailed status afterward. HEAD movement invalidates M1 history sessions. Normal commit also
+invalidates captured history after change authority is fenced and before Git starts, because a
+failed post-status cannot prove that the old HEAD remains current (even spawn failure may therefore
+retire history conservatively). Stage/unstage history behavior remains unchanged.
 
 Run mutation Git processes in a Linux process group. At the operation deadline, send TERM to the
 group, wait two seconds, then send KILL if needed; wait/reap Git and drain bounded output. Never
 delete a possible Git lock file automatically. Mutation pipe readers must be cancellation-aware so
-a deliberately detached configured process cannot keep Orbit waiting indefinitely.
+a deliberately detached configured process cannot keep Orbit waiting indefinitely. Commit stdin
+delivery shares that deadline, starts after output draining, and uses a cancellation-aware
+nonblocking writer that closes stdin on completion or cancellation.
 
 Return an applied, rejected, or uncertain typed receipt once Git has started. Do not automatically
 retry uncertain operations. A missing post-state refresh leaves old handles invalid and explicitly

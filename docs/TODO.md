@@ -45,8 +45,8 @@
 - [x] Require fresh staged content and reject unresolved conflicts or unsupported continuation state.
 - [x] Implement index-only normal commit without editor, amend, paths, `-a`, empty commit, or hook bypass.
 - [x] Preserve and test pre-commit, prepare-commit-msg, commit-msg, post-commit, and configured signing behavior.
-- [x] Compare pre/post HEAD, invalidate stale history, and distinguish completed commit from uncertain process outcome.
-- [x] Cover unborn and detached commits, hook message changes/rejections, signing failure, output bounds, timeout, stale state, and external index races.
+- [x] Compare pre/post HEAD, conservatively invalidate captured history before commit launch, and distinguish completed commit from uncertain process outcome.
+- [x] Cover unborn and detached commits, hook message changes/rejections, signing failure, stdin/output bounds, early/late timeout, stale state, external/process index races, and unavailable post-state/history authority.
 - [x] Add purpose-specific commit IPC and matching TypeScript wrapper.
 
 ---

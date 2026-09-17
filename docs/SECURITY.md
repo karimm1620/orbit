@@ -299,7 +299,10 @@ constructs or interpolates that command. Their output and Orbit's wait duration 
 
 Commit messages are validated UTF-8 data, at most 64 KiB, nonblank, and NUL-free. Rust writes them
 to Git's stdin with `--file=- --cleanup=verbatim`; they never enter a shell or command-line option.
-No editor/template is launched and Orbit creates no plaintext message temp file. Git still creates
+Output draining begins before stdin delivery. The nonblocking stdin writer shares the mutation
+deadline and cancellation, closes the pipe on every exit, and is joined after cancellation so a
+stalled or escaped helper cannot keep Orbit blocked in message delivery. No editor/template is
+launched and Orbit creates no plaintext message temp file. Git still creates
 its normal worktree-specific `COMMIT_EDITMSG` for hooks and may retain it after failure. Orbit does
 not persist or log the message.
 
@@ -315,7 +318,10 @@ explicit uncertain outcome rather than a false rollback claim.
 One Rust-owned mutation lease per repository, with a process-wide bound, serializes Orbit stage,
 unstage, and commit actions without holding a global mutex over process I/O. Beginning a mutation
 retires the authorizing change set and advances its generation. Every started mutation attempts a
-fresh semantic status installation; HEAD movement also invalidates history sessions. Old handles
+fresh semantic status installation; HEAD movement also invalidates history sessions. Normal commits
+conservatively invalidate history after change authority is fenced and before Git starts, so failed
+post-status cannot preserve old history authority. `headChanged` requires observed post-state proof.
+Ordinary stage/unstage history behavior is unchanged. Old handles
 never regain authority merely because a hook or refresh failed. No Tauri capability expansion is
 approved.
 
@@ -330,7 +336,7 @@ fencing. M3-B2 adds only `create_commit(repository_id, change_set_id, message)`:
 blank, NUL, or over-64-KiB messages and sends accepted UTF-8 bytes through Git stdin, never an
 argument, shell, or Orbit temporary file. The fixed commit keeps hooks and configured signing
 enabled after explicit user intent, retains fsmonitor/pager/lazy-fetch/environment hardening,
-verifies post-state HEAD, and invalidates history on movement. No UI or capability expansion is
+verifies post-state HEAD, and conservatively invalidates history before commit launch. No UI or capability expansion is
 introduced.
 
 ---

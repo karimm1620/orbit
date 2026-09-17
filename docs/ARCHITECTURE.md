@@ -638,6 +638,9 @@ configured code.
 After any started mutation, Rust attempts one hardened detailed-status refresh and returns a newly
 installed change set when available. Old change handles remain invalid even if refresh fails. HEAD
 movement invalidates M1 history sessions and causes the frontend to start a fresh history snapshot.
+Normal commits conservatively invalidate captured history after change authority is fenced and
+before Git starts, including when post-status is unavailable; `headChanged` still requires observed
+post-state proof. Ordinary stage/unstage history behavior is unchanged.
 Frontend request generations still prevent a late result from crossing a repository switch, while
 the Rust lease and registry generation remain authoritative for mutation ordering.
 
@@ -660,8 +663,11 @@ output bounds, waiting, and reaping remain inside the existing runner. Commit-me
 M3-B2 adds fixed `create_commit` IPC. It accepts only repository/change-set IDs and a validated
 message, passes that message through the mutation runner's internal bounded stdin pipe to
 `git commit --file=- --cleanup=verbatim`, and returns the verified new HEAD OID when applied.
-Commit hooks and configured signing remain normal explicit-mutation behavior; post-state HEAD
-movement invalidates history sessions. The M3 UI remains deferred.
+Output readers start before a nonblocking, cancellation-aware message writer; the operation
+deadline includes stdin delivery, and writer completion closes the pipe for EOF. Commit hooks and
+configured signing remain normal explicit-mutation behavior. Captured history is invalidated before
+commit launch; verified HEAD advancement after timeout is applied with a warning. The M3 UI remains
+deferred.
 
 ---
 

@@ -348,11 +348,14 @@ an opt-in mutation execution mode:
 
 1. create a new process group using the Linux standard-library process configuration;
 2. supply either closed stdin or the bounded commit-message pipe;
-3. drain bounded stdout/stderr concurrently;
+3. start bounded stdout/stderr draining before the nonblocking, cancellation-aware stdin writer;
 4. at the deadline, send TERM to the process group and allow a two-second grace period;
-5. send KILL to the group if Git remains, wait/reap Git, and finish draining pipes;
-6. make mutation pipe readers cancellation-aware/nonblocking so a descendant that deliberately
-   leaves the process group while retaining a pipe cannot hang Orbit's reader join;
+5. send KILL if the group remains (even if Git already exited), wait/reap Git, and finish draining
+   pipes;
+6. make mutation pipe readers and the commit stdin writer cancellation-aware/nonblocking so a
+   descendant that deliberately leaves the process group while retaining a pipe cannot hang Orbit's
+   joins; the deadline starts before spawn and includes message delivery, and stdin closes on every
+   writer exit (EOF after successful delivery);
 7. never delete a possible Git lock file automatically.
 
 Process-group signalling requires a small direct Unix syscall binding. A direct `libc` dependency
@@ -418,7 +421,10 @@ from reinstalling pre-mutation handles. File diff responses are also rejected by
 generation once mutation begins. A later explicit refresh is allowed to supersede older reads.
 
 History sessions are invalidated whenever post-state shows HEAD changed, including a hook-created
-commit or uncertain commit outcome. Stage/unstage normally retain the captured history snapshot,
+commit or uncertain commit outcome. Normal commit additionally invalidates captured history after
+change authority is fenced and before Git starts: unavailable post-status cannot prove the old HEAD
+is authoritative. This conservatively retires history even on spawn failure; `headChanged` and the
+commit OID still require observed post-state proof. Stage/unstage normally retain the captured history snapshot,
 but the frontend refreshes repository metadata after the mutation.
 
 ---
