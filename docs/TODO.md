@@ -64,11 +64,11 @@
 
 ## 4. M3-D — Final test, security, and polish gate
 
-- [ ] Re-audit every mutation argument, stdin/environment/config surface, and opaque-handle authorization path.
-- [ ] Prove no shell, generic Git/process/filesystem IPC, frontend path/revision authority, or Tauri capability expansion.
-- [ ] Verify mutation leases, stale/superseded reads, post-state installation, history invalidation, and external lock failures.
-- [ ] Verify descendants are stopped and Git is reaped on filter/hook/signing timeout; never auto-delete locks.
-- [ ] Run the complete frontend/Rust/Tauri validation gate and report actual counts.
+- [x] Re-audit every mutation argument, stdin/environment/config surface, and opaque-handle authorization path.
+- [x] Prove no shell, generic Git/process/filesystem IPC, frontend path/revision authority, or Tauri capability expansion.
+- [x] Verify mutation leases, stale/superseded reads, post-state installation, history invalidation, and external lock failures.
+- [x] Verify descendants are stopped and Git is reaped on filter/hook/signing timeout; never auto-delete locks.
+- [x] Run the complete frontend/Rust/Tauri validation gate and report actual counts.
 - [ ] Perform a representative real-repository desktop stage/unstage/commit smoke when the environment can drive the native picker.
 
 ---

@@ -319,7 +319,7 @@ impl RepositoryRegistry {
                 .as_ref()
                 .is_some_and(|status| !status.success());
 
-        let outcome = if exited_successfully && expected_transition {
+        let outcome = if exited_successfully && state_changed && expected_transition {
             MutationOutcome::Applied
         } else if exited_with_rejection && !state_changed {
             MutationOutcome::Rejected
@@ -781,7 +781,7 @@ fn mutation_issue(
         let (code, message) = match termination {
             GitMutationTermination::TimedOut => (
                 "mutation_timed_out",
-                "Git exceeded Orbit's staging deadline. Repository state was refreshed where possible; do not retry until it is inspected.",
+                "Git exceeded Orbit's mutation deadline. Repository state was refreshed where possible; do not retry until it is inspected.",
             ),
             GitMutationTermination::OutputTooLarge => (
                 "mutation_outcome_uncertain",
@@ -3722,6 +3722,58 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn stage_file_requires_an_observable_transition_after_index_hook_completion() {
+        let repository = TestRepository::new();
+        repository.commit_file("mixed.txt", "base\n", "Base");
+        repository.write("mixed.txt", "staged\n");
+        repository.git_ok(["add", "--", "mixed.txt"]);
+        repository.write("mixed.txt", "staged and unstaged\n");
+
+        let saved_index = repository.root.join(".git/orbit-index-before-stage");
+        fs::copy(repository.root.join(".git/index"), &saved_index).expect("save index fixture");
+        let hook = repository.root.join(".git/hooks/post-index-change");
+        fs::write(
+            &hook,
+            "#!/bin/sh\ncp .git/orbit-index-before-stage .git/index\n",
+        )
+        .expect("write restoring hook");
+        let mut permissions = fs::metadata(&hook).expect("hook metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&hook, permissions).expect("make hook executable");
+
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open fixture");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("read mixed changes");
+        let file = changed_file(&changes, "mixed.txt");
+        assert!(file.staged.is_some() && file.unstaged.is_some());
+
+        let receipt = registry
+            .stage_file(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                file.file_id.as_str(),
+            )
+            .expect("started stage returns a receipt");
+
+        assert_eq!(receipt.outcome, MutationOutcome::Uncertain);
+        assert_eq!(
+            receipt.issue.as_ref().map(|issue| issue.code),
+            Some("mutation_outcome_uncertain")
+        );
+        let post = receipt
+            .repository_changes
+            .expect("post-hook state remains inspectable");
+        let mixed = changed_file(&post, "mixed.txt");
+        assert!(mixed.staged.is_some() && mixed.unstaged.is_some());
+        assert!(!receipt.refresh_required);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn required_process_filter_rejection_is_typed_and_refreshes_state() {
         let repository = TestRepository::new();
         repository.write(".gitattributes", "tracked.txt filter=orbit-process\n");
@@ -3954,6 +4006,104 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn stage_filter_timeout_stops_filter_descendants_and_reaps_git() {
+        let repository = TestRepository::new();
+        repository.write(".gitattributes", "tracked.txt filter=orbit-timeout\n");
+        repository.write("tracked.txt", "base\n");
+        repository.git_ok(["add", "--", ".gitattributes", "tracked.txt"]);
+        repository.git_ok(["commit", "-m", "Base"]);
+        let filter = repository.root.join("timeout-filter.sh");
+        fs::write(
+            &filter,
+            "#!/bin/sh\ntrap '' TERM\necho $$ > .git/orbit-filter-pid\n( trap '' TERM; sleep 30 ) &\necho $! > .git/orbit-filter-descendant\nwait\n",
+        )
+        .expect("write timeout filter");
+        fs::set_permissions(&filter, fs::Permissions::from_mode(0o755))
+            .expect("make timeout filter executable");
+        repository.git_ok([
+            "config",
+            "filter.orbit-timeout.clean",
+            filter.to_str().expect("UTF-8 filter path"),
+        ]);
+        repository.git_ok(["config", "filter.orbit-timeout.required", "true"]);
+        repository.write("tracked.txt", "changed\n");
+
+        let runner = GitRunner::default().with_mutation_deadline(Duration::from_millis(200));
+        let registry = RepositoryRegistry::with_runner(runner);
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open fixture");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("read changes");
+        let file = changed_file(&changes, "tracked.txt");
+        let receipt = registry
+            .stage_file(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                file.file_id.as_str(),
+            )
+            .expect("filter timeout returns a receipt");
+
+        assert_eq!(receipt.outcome, MutationOutcome::Uncertain);
+        assert_eq!(
+            receipt.issue.as_ref().map(|issue| issue.code),
+            Some("mutation_timed_out")
+        );
+        for name in ["orbit-filter-pid", "orbit-filter-descendant"] {
+            let pid = fs::read_to_string(repository.git_path(name)).expect("filter process PID");
+            wait_for_process_exit(pid.trim());
+        }
+    }
+
+    #[test]
+    fn external_index_lock_is_rejected_and_never_removed() {
+        let repository = TestRepository::new();
+        repository.commit_file("tracked.txt", "base\n", "Base");
+        repository.write("tracked.txt", "changed\n");
+        let registry = RepositoryRegistry::default();
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open fixture");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("read changes");
+        let file = changed_file(&changes, "tracked.txt");
+        let lock = repository.git_path("index.lock");
+        fs::write(&lock, b"owned by another process\n").expect("create external index lock");
+
+        let receipt = registry
+            .stage_file(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                file.file_id.as_str(),
+            )
+            .expect("Git lock failure returns a receipt");
+
+        assert_eq!(receipt.outcome, MutationOutcome::Rejected);
+        let issue = receipt.issue.as_ref().expect("lock rejection diagnostic");
+        assert_eq!(issue.code, "mutation_rejected");
+        assert!(issue
+            .details
+            .as_deref()
+            .is_some_and(|details| details.contains("did not remove")));
+        assert_eq!(
+            fs::read(&lock).expect("external lock remains"),
+            b"owned by another process\n"
+        );
+        assert_eq!(
+            receipt
+                .repository_changes
+                .as_ref()
+                .expect("post-lock state")
+                .summary
+                .unstaged,
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn post_index_timeout_is_uncertain_but_returns_the_actual_staged_state() {
         let repository = TestRepository::new();
         repository.commit_file("tracked.txt", "base\n", "Base");
@@ -3988,10 +4138,10 @@ mod tests {
 
         assert!(entered.exists());
         assert_eq!(receipt.outcome, MutationOutcome::Uncertain);
-        assert_eq!(
-            receipt.issue.as_ref().map(|issue| issue.code),
-            Some("mutation_timed_out")
-        );
+        let issue = receipt.issue.as_ref().expect("timeout diagnostic");
+        assert_eq!(issue.code, "mutation_timed_out");
+        assert!(issue.message.contains("mutation deadline"));
+        assert!(!issue.message.contains("staging deadline"));
         let post = receipt
             .repository_changes
             .expect("post-timeout status should still install");
@@ -4409,6 +4559,57 @@ mod tests {
             marker.exists(),
             "configured signer must execute for explicit commit"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commit_signing_timeout_stops_signer_descendants_and_reaps_git() {
+        let repository = TestRepository::new();
+        repository.commit_file("base.txt", "base\n", "base");
+        repository.write("next.txt", "next\n");
+        repository.git_ok(["add", "--", "next.txt"]);
+        let signer = repository.root.join("timeout-signer");
+        fs::write(
+            &signer,
+            "#!/bin/sh\ntrap '' TERM\necho $$ > .git/orbit-signer-pid\n( trap '' TERM; sleep 30 ) &\necho $! > .git/orbit-signer-descendant\nwait\n",
+        )
+        .expect("write timeout signer");
+        fs::set_permissions(&signer, fs::Permissions::from_mode(0o755))
+            .expect("make timeout signer executable");
+        repository.git_ok(["config", "commit.gpgSign", "true"]);
+        repository.git_ok([
+            "config",
+            "gpg.program",
+            signer.to_str().expect("UTF-8 signer path"),
+        ]);
+
+        let runner = GitRunner::default().with_mutation_deadline(Duration::from_millis(200));
+        let registry = RepositoryRegistry::with_runner(runner);
+        let opened = registry
+            .open(repository.root.clone())
+            .expect("open fixture");
+        let changes = registry
+            .repository_changes(&opened.repository_id)
+            .expect("changes");
+        let before = repository.oid("HEAD");
+        let receipt = registry
+            .create_commit(
+                &opened.repository_id,
+                changes.change_set_id.as_str(),
+                "signed timeout",
+            )
+            .expect("signer timeout returns a receipt");
+
+        assert_eq!(receipt.outcome, MutationOutcome::Uncertain);
+        assert_eq!(
+            receipt.issue.as_ref().map(|issue| issue.code),
+            Some("mutation_timed_out")
+        );
+        assert_eq!(repository.oid("HEAD"), before);
+        for name in ["orbit-signer-pid", "orbit-signer-descendant"] {
+            let pid = fs::read_to_string(repository.git_path(name)).expect("signer process PID");
+            wait_for_process_exit(pid.trim());
+        }
     }
 
     #[cfg(unix)]

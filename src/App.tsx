@@ -15,6 +15,7 @@ import {
   failChangesRefresh,
   failDiffLoad,
   failMutation,
+  mutationFailureRequiresRefresh,
   shouldRefreshAfterMutation,
   workingTreeForChanges,
   type ChangesState,
@@ -220,7 +221,7 @@ function App() {
     } catch (requestError) {
       if (sequence !== requestSequence.current) return false;
       const orbitError = toOrbitError(requestError);
-      const stale = orbitError.code === "mutation_stale" || orbitError.code === "change_set_unavailable";
+      const stale = mutationFailureRequiresRefresh(operation, orbitError);
       setChanges((current) => failMutation(current, requestId, operation, orbitError, stale));
       if (stale) await refreshRepository();
       return false;

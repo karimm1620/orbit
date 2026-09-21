@@ -197,6 +197,22 @@ export function shouldRefreshAfterMutation(receipt: MutationReceipt): boolean {
   return receipt.operation === "createCommit" || receipt.headChanged || receipt.refreshRequired;
 }
 
+export function mutationFailureRequiresRefresh(
+  operation: MutationOperation,
+  error: OrbitError,
+): boolean {
+  if (error.code === "mutation_stale" || error.code === "change_set_unavailable") return true;
+
+  const operationNames: Record<MutationOperation, string> = {
+    stageFile: "stage_file",
+    unstageFile: "unstage_file",
+    stageAll: "stage_all",
+    unstageAll: "unstage_all",
+    createCommit: "create_commit",
+  };
+  return error.operation === operationNames[operation];
+}
+
 export function failChangesRefresh(
   state: ChangesState,
   requestId: number,

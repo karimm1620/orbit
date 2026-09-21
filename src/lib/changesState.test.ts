@@ -14,6 +14,7 @@ import {
   failDiffLoad,
   failMutation,
   groupChanges,
+  mutationFailureRequiresRefresh,
   shouldRefreshAfterMutation,
   workingTreeForChanges,
 } from "./changesState";
@@ -236,6 +237,12 @@ describe("changes state", () => {
     state = completeChangesRefresh(beginChangesRefresh(state, 3), 3, refreshed);
     expect(state.stale).toBe(false);
     expect(state.mutation.feedback?.refreshRequired).toBe(false);
+  });
+
+  it("refreshes when an operation-phase error arrives after authority may be retired", () => {
+    expect(mutationFailureRequiresRefresh("stageFile", { ...error, code: "git_not_found", operation: "stage_file" })).toBe(true);
+    expect(mutationFailureRequiresRefresh("createCommit", { ...error, code: "internal_error", operation: "create_commit" })).toBe(true);
+    expect(mutationFailureRequiresRefresh("stageFile", { ...error, code: "mutation_in_progress", operation: "mutate_repository" })).toBe(false);
   });
 
   it("requires a repository and history refresh after commits or observed HEAD movement", () => {
