@@ -14,9 +14,16 @@ pub struct OrbitError {
     pub recoverable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_required: Option<bool>,
 }
 
 impl OrbitError {
+    pub fn requiring_refresh(mut self) -> Self {
+        self.refresh_required = Some(true);
+        self
+    }
+
     pub fn git_spawn(operation: &'static str, error: &io::Error) -> Self {
         if error.kind() == io::ErrorKind::NotFound {
             return Self {
@@ -26,6 +33,7 @@ impl OrbitError {
                 operation,
                 recoverable: true,
                 details: None,
+                refresh_required: None,
             };
         }
 
@@ -36,6 +44,7 @@ impl OrbitError {
             operation,
             recoverable: true,
             details: Some(sanitize_diagnostic(&error.to_string())),
+            refresh_required: None,
         }
     }
 
@@ -47,6 +56,7 @@ impl OrbitError {
             operation: "open_repository",
             recoverable: true,
             details: None,
+            refresh_required: None,
         }
     }
 
@@ -58,6 +68,7 @@ impl OrbitError {
             operation: "read_repository",
             recoverable: true,
             details: None,
+            refresh_required: None,
         }
     }
 
@@ -69,6 +80,7 @@ impl OrbitError {
             operation,
             recoverable: true,
             details: None,
+            refresh_required: None,
         }
     }
 
@@ -80,6 +92,7 @@ impl OrbitError {
             operation: "detect_git_capabilities",
             recoverable: true,
             details: None,
+            refresh_required: None,
         }
     }
 
@@ -91,6 +104,7 @@ impl OrbitError {
             operation: "read_commit_history",
             recoverable: true,
             details: None,
+            refresh_required: None,
         }
     }
 
@@ -102,6 +116,7 @@ impl OrbitError {
             operation: "read_commit_history",
             recoverable: true,
             details: None,
+            refresh_required: None,
         }
     }
 
@@ -113,6 +128,7 @@ impl OrbitError {
             operation: "read_repository_changes",
             recoverable: true,
             details: None,
+            refresh_required: Some(true),
         }
     }
 
@@ -124,6 +140,7 @@ impl OrbitError {
             operation: "read_repository_changes",
             recoverable: true,
             details: None,
+            refresh_required: None,
         }
     }
 
@@ -135,6 +152,7 @@ impl OrbitError {
             operation: "mutate_repository",
             recoverable: true,
             details: None,
+            refresh_required: None,
         }
     }
 
@@ -146,6 +164,7 @@ impl OrbitError {
             operation: "mutate_repository",
             recoverable: true,
             details: None,
+            refresh_required: Some(true),
         }
     }
 
@@ -157,6 +176,7 @@ impl OrbitError {
             operation: "mutate_repository",
             recoverable: true,
             details: None,
+            refresh_required: None,
         }
     }
 
@@ -168,6 +188,7 @@ impl OrbitError {
             operation: "create_commit",
             recoverable: true,
             details: None,
+            refresh_required: None,
         }
     }
 
@@ -179,6 +200,7 @@ impl OrbitError {
             operation: "create_commit",
             recoverable: true,
             details: None,
+            refresh_required: None,
         }
     }
 
@@ -229,6 +251,7 @@ impl OrbitError {
             operation,
             recoverable: true,
             details: None,
+            refresh_required: None,
         }
     }
 
@@ -261,6 +284,7 @@ impl OrbitError {
             operation,
             recoverable: true,
             details,
+            refresh_required: None,
         }
     }
 
@@ -276,6 +300,7 @@ impl OrbitError {
             operation,
             recoverable: true,
             details: (!detail.is_empty()).then_some(detail),
+            refresh_required: None,
         }
     }
 
@@ -287,6 +312,7 @@ impl OrbitError {
             operation,
             recoverable: true,
             details: None,
+            refresh_required: None,
         }
     }
 
@@ -298,6 +324,7 @@ impl OrbitError {
             operation,
             recoverable: true,
             details: None,
+            refresh_required: None,
         }
     }
 
@@ -313,6 +340,7 @@ impl OrbitError {
             operation,
             recoverable: false,
             details: None,
+            refresh_required: None,
         }
     }
 }
@@ -375,5 +403,20 @@ mod tests {
             .details
             .as_deref()
             .is_some_and(|detail| detail.contains("index lock")));
+    }
+
+    #[test]
+    fn mutation_refresh_requirement_is_explicitly_attached_to_lifecycle_errors() {
+        assert_eq!(OrbitError::commit_message_invalid().refresh_required, None);
+        assert_eq!(
+            OrbitError::internal("post_fence_operation", "failed")
+                .requiring_refresh()
+                .refresh_required,
+            Some(true)
+        );
+        assert_eq!(
+            OrbitError::mutation_stale("stale authority").refresh_required,
+            Some(true)
+        );
     }
 }

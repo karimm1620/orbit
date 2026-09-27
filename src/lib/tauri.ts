@@ -48,6 +48,7 @@ export type OrbitError = {
   operation: string;
   recoverable: boolean;
   details?: string;
+  refreshRequired?: boolean;
 };
 
 export type GraphCommit = {
@@ -341,6 +342,7 @@ function isOrbitError(value: unknown): value is OrbitError {
     typeof candidate.message === "string" &&
     typeof candidate.operation === "string" &&
     typeof candidate.recoverable === "boolean" &&
-    (candidate.details === undefined || typeof candidate.details === "string")
+    (candidate.details === undefined || typeof candidate.details === "string") &&
+    (candidate.refreshRequired === undefined || typeof candidate.refreshRequired === "boolean")
   );
 }

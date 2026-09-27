@@ -17,4 +17,9 @@ describe("commit message UI boundary", () => {
     expect(isCommitMessageEligible(tooLong)).toBe(false);
     expect(messageLimitReason(tooLong)).toContain("limit");
   });
+
+  it("matches Rust whitespace validation for NEL and BOM edge cases", () => {
+    expect(isCommitMessageEligible("\u0085")).toBe(false);
+    expect(isCommitMessageEligible("\uFEFF")).toBe(true);
+  });
 });

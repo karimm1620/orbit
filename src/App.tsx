@@ -221,7 +221,7 @@ function App() {
     } catch (requestError) {
       if (sequence !== requestSequence.current) return false;
       const orbitError = toOrbitError(requestError);
-      const stale = mutationFailureRequiresRefresh(operation, orbitError);
+      const stale = mutationFailureRequiresRefresh(orbitError);
       setChanges((current) => failMutation(current, requestId, operation, orbitError, stale));
       if (stale) await refreshRepository();
       return false;
@@ -321,9 +321,7 @@ function RepositoryWorkspace({
 }) {
   const headLabel = repository.head.detached ? "Detached HEAD" : (repository.head.branch ?? "Unborn branch");
   const oid = repository.head.oid?.slice(0, 8);
-  const workingTree = workspaceView === "changes"
-    ? workingTreeForChanges(changes, repository.workingTree)
-    : repository.workingTree;
+  const workingTree = workingTreeForChanges(changes, repository.workingTree);
   return (
     <div className="workspace">
       <section className="repository-heading"><div><p className="eyebrow">Repository</p><h1>{repository.displayName}</h1><p className="repository-path" title={repository.root}>{repository.root}</p></div><button className="button button-secondary" onClick={onRefresh} disabled={refreshing || changes.mutation.status === "running"}>{refreshing ? "Refreshing..." : "Refresh"}</button></section>

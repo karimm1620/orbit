@@ -239,10 +239,23 @@ describe("changes state", () => {
     expect(state.mutation.feedback?.refreshRequired).toBe(false);
   });
 
-  it("refreshes when an operation-phase error arrives after authority may be retired", () => {
-    expect(mutationFailureRequiresRefresh("stageFile", { ...error, code: "git_not_found", operation: "stage_file" })).toBe(true);
-    expect(mutationFailureRequiresRefresh("createCommit", { ...error, code: "internal_error", operation: "create_commit" })).toBe(true);
-    expect(mutationFailureRequiresRefresh("stageFile", { ...error, code: "mutation_in_progress", operation: "mutate_repository" })).toBe(false);
+  it("uses Rust's explicit refresh signal for pre-fence and post-fence failures", () => {
+    const preFence = { ...error, code: "commit_message_invalid", operation: "create_commit" };
+    const postFence = { ...error, code: "internal_error", operation: "refresh_repository", refreshRequired: true };
+    expect(mutationFailureRequiresRefresh(preFence)).toBe(false);
+    expect(mutationFailureRequiresRefresh(postFence)).toBe(true);
+  });
+
+  it("keeps a current accepted mutation summary in the shared rail after switching to History", () => {
+    const initial = changes("change-set-one", [file("first", { unstaged: { kind: "modified", oldMode: "100644", newMode: "100644", similarity: null } })]);
+    initial.summary = summary(0, 1, 0, 0);
+    const staged = changes("change-set-two", [file("first", { staged: { kind: "modified", oldMode: "100644", newMode: "100644", similarity: null } })]);
+    staged.summary = summary(1, 0, 0, 0);
+    let state = completeChangesRefresh(beginChangesRefresh(createEmptyChangesState(), 1), 1, initial);
+    state = beginMutation(state, 2, "stageFile");
+    state = completeMutation(state, 2, receipt("stageFile", "applied", staged));
+
+    expect(workingTreeForChanges(state, snapshotSummary)).toEqual(summary(1, 0, 0, 0));
   });
 
   it("requires a repository and history refresh after commits or observed HEAD movement", () => {
